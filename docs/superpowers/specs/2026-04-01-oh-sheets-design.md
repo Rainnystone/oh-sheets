@@ -39,7 +39,6 @@ oh-sheets/
 ├── SKILL.md                # The primary agent instructions and routing logic
 ├── scripts/                # Immutable core utility scripts
 │   ├── env_check.py        # Validates docling, pandas, openpyxl, etc.
-│   ├── ralph_loop.py       # A lightweight, custom task loop orchestrator specifically for training
 │   ├── data_diff.py        # The deterministic JSON/CSV diff tool for the RALPH loop
 │   └── excel_writer.py     # The non-destructive openpyxl writer
 └── references/
@@ -88,20 +87,20 @@ The Agent (orchestrator) handles the execution. It NEVER calls these scripts bli
 
 #### Workflow 0: The Environment Sentinel (Pre-flight Check)
 * **Trigger:** Runs automatically via `scripts/env_check.py` at the start of ANY invocation.
-* **Role:** Ensures required packages (`docling`, `pdf2image`, `pandas`, `openpyxl`, `Pillow`, `litellm`) and system dependencies (`poppler`) are installed. Halts with an actionable installation command if missing.
+* **Role:** Ensures required packages (`docling`, `pdf2image`, `pandas`, `openpyxl`, `Pillow`) and system dependencies (`poppler`) are installed. Halts with an actionable installation command if missing.
 
-#### Workflow A: The Learner (Adaptive Training via Internal Custom RALPH Loop)
+#### Workflow A: The Learner (Adaptive Training via Agent-Driven RALPH Loop)
 * **Trigger:** User completes the Interactive Initialization Flow.
-* **Note on Custom RALPH Loop & Platform Adaptation:** `ralph_loop.py` is a lightweight, platform-agnostic orchestrator that uses the `litellm` library. It automatically detects and uses the user's existing environment variables (e.g., `GEMINI_API_KEY` or `ANTHROPIC_API_KEY`). This ensures cross-platform compatibility without requiring deep integration into the host Agent's specific tool-use framework.
+* **Note on Agent-Driven RALPH Loop:** To avoid requiring users to manage API keys or install brittle third-party LLM wrappers like `litellm`, the RALPH loop is handled entirely via **Inversion of Control**. The host Agent (e.g., Gemini CLI) acts as the loop orchestrator, utilizing its native tool-calling permissions and existing session authentication.
 * **Process:**
-  1. **Schema Generation:** LLM analyzes the `Blank Base Template` to create `schema.json`.
-  2. **Draft:** LLM drafts an initial variant script (e.g., `pdf_variant_a.py`).
-  3. **Test:** `ralph_loop.py` runs the drafted script on the Test Set Input.
-  4. **Data-Level Diff:** `scripts/data_diff.py` strictly compares *data values* against the Benchmark Output.
-  5. **Reflect & Fix (The Loop):** `ralph_loop.py` automatically reads the diff report and feeds it back to the LLM to update the Python script and `rules.md`.
+  1. **Schema Generation:** Agent analyzes the `Blank Base Template` to create `schema.json`.
+  2. **Draft:** Agent drafts an initial variant script (e.g., `pdf_variant_a.py`) using its native file-writing tools.
+  3. **Test:** Agent natively executes the drafted script on the Test Set Input.
+  4. **Data-Level Diff:** Agent natively executes `scripts/data_diff.py` to strictly compare *data values* against the Benchmark Output.
+  5. **Reflect & Fix (The Agent Loop):** The Agent reads the `stdout` of the diff tool. If errors exist, the Agent uses its context window to iteratively rewrite the Python script and re-run the tests.
   6. **End Conditions & Error Handling:** 
      - *Success:* Terminates when `data_diff.py` reports 100% accuracy.
-     - *Mismatch Error:* If max iterations (e.g., 5) are reached, execution halts and prompts the user: *"Extraction failed to converge. Please check if the Sample Input actually contains all the data required by the Target Output."*
+     - *Mismatch Error:* Guided by `prompt_templates.md`, if the Agent fails after 5 iterations, it halts and prompts the user: *"Extraction failed to converge. Please check if the Sample Input actually contains all the data required by the Target Output."*
 
 #### Workflow B: The Multi-modal Extractor (Execution with Variant Routing)
 * **Trigger:** User provides a new document and specifies the target template.
@@ -118,7 +117,7 @@ The Agent (orchestrator) handles the execution. It NEVER calls these scripts bli
 * **Loop Limit:** To prevent endless looping, the B → C → B loop is capped at a maximum of 3 attempts. If it fails on the 3rd attempt, execution halts for human intervention.
 
 #### Workflow D: The Continuous Learning Trigger
-* **Role:** If Workflow B relies heavily on LLM fallback, it prompts: "I had to use LLM fallback for this document format. Should I run an internal RALPH loop to create a new extractor script variant for this layout?" 
+* **Role:** If Workflow B relies heavily on LLM fallback, it prompts: "I had to use LLM fallback for this document format. Should I run an Agent-driven RALPH loop to create a new extractor script variant for this layout?" 
 * **Requirement:** To run this loop safely for the new layout variant, the system *must* pause and ask the user to provide a verified Test Set Benchmark Output for this specific new document before proceeding.
 
 #### Workflow E: The Non-Destructive Writer
@@ -127,6 +126,6 @@ The Agent (orchestrator) handles the execution. It NEVER calls these scripts bli
 ## Phased Implementation Plan
 
 To manage complexity, the development of `oh-sheets!` will be phased:
-*   **Phase 1: Core Deterministic Pipeline.** Implement Workflow 0 (Environment), Workflow A (Learner loop including `ralph_loop.py`), Workflow B (Basic Execution), and Workflow E (Non-destructive writer).
+*   **Phase 1: Core Deterministic Pipeline.** Implement Workflow 0 (Environment), Workflow A (Agent-driven Learner loop), Workflow B (Basic Execution), and Workflow E (Non-destructive writer).
 *   **Phase 2: Semantic Resilience.** Implement Workflow B fallback (Vision & Pandas rescue) and Workflow C (Sanity Checker).
 *   **Phase 3: Continuous Evolution.** Implement Workflow D (Continuous Learning / Variant Management) and the CLI management commands (`list`, `delete`).
