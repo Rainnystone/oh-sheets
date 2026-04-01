@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+test_*.xlsx
+test_*.json
+.DS_Store
