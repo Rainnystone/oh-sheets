@@ -8,7 +8,7 @@ Instead of hardcoding brittle regex rules, `oh-sheets!` learns from user-provide
 
 ## 🚀 What it is & Why it exists
 
-Data extraction into Excel often involves brittle scripts that break the moment a vendor changes their invoice layout. `oh-sheets!` acts as the orchestrator:
+Data extraction into Excel often involves brittle scripts that break when source layouts change. `oh-sheets!` acts as the orchestrator:
 - **Zero-Config Learning:** Show it a sample input and your desired filled Excel template. It writes its own extraction code.
 - **Non-Destructive:** Uses `openpyxl` to inject data without destroying your template's styling, formulas, or macros.
 - **Vision Fallback & Sanity Checking:** If a deterministic script fails due to an unexpected layout change, it gracefully falls back to native Vision capabilities and semantic reasoning to ensure data integrity.
@@ -33,17 +33,19 @@ To teach `oh-sheets!` a new template, simply run:
 oh-sheets learn
 ```
 The agent will interactively prompt you for:
-1. **Template Name:** (e.g., `VendorInvoices`)
+1. **Template Name:** (e.g., `ProjectTemplate`)
 2. **Blank Base Template:** The empty target Excel file.
 3. **Sample Input & Target Output:** A sample PDF/Image and the perfectly filled Excel file based on that input.
 4. **Test Set:** A secondary set of files to validate the generated code.
 
 The Agent will run its internal **RALPH Loop**, writing, testing, and refining a Python extractor script until it achieves 100% data match against your Test Set.
 
+`schema.json` can now record row/column relations between fields using `relative_to`, `row_offset`, and `col_offset` so future template versions can be compared and migrated by structure rather than raw cell positions alone.
+
 ### 2. Daily Execution
 Once trained, use the unified routing command for your daily tasks:
 ```bash
-oh-sheets extract --template 'VendorInvoices' --input new_invoice.pdf --output out.xlsx
+oh-sheets extract --template 'ProjectTemplate' --input source_file.pdf --output out.xlsx
 ```
 
 ### 3. Management
@@ -53,7 +55,7 @@ oh-sheets list
 ```
 Delete a template:
 ```bash
-oh-sheets delete 'VendorInvoices'
+oh-sheets delete 'ProjectTemplate'
 ```
 
 ## 🧠 Deep Dive: Handling Diverse Excel Needs

@@ -16,7 +16,7 @@ The system prioritizes a clean, explicit, and guided user experience.
 ### Interactive Initialization & Learning Flow
 To ensure the system has all necessary data to generate a robust script, the initialization and learning process is highly interactive:
 
-1.  **Trigger & Naming:** User initiates: `oh-sheets learn`. The Agent prompts: *"What would you like to name this template? (e.g., VendorInvoices)"*. This establishes the `<template-name>` for storage.
+1.  **Trigger & Naming:** User initiates: `oh-sheets learn`. The Agent prompts: *"What would you like to name this template? (e.g., ProjectTemplate)"*. This establishes the `<template-name>` for storage.
 2.  **Workspace Confirmation:** The agent confirms the working directory.
 3.  **Sample Data Prompt:** The agent asks for the paths to:
     - `Blank Base Template` (the empty target Excel file structure)
@@ -30,10 +30,10 @@ To ensure the system has all necessary data to generate a robust script, the ini
 
 ### Daily Execution & Management Commands
 *   **Daily Execution:** 
-    `"oh-sheets extract --template 'VendorInvoices' --input new_invoice.pdf --output out.xlsx"` *(Note: `--output` overwrites the destination file by default).*
+    `"oh-sheets extract --template 'ProjectTemplate' --input source_file.pdf --output out.xlsx"` *(Note: `--output` overwrites the destination file by default).*
 *   **Management:** 
     `"oh-sheets list"` (Outputs a table showing: Template Name, Number of Variants, Last Updated).
-    `"oh-sheets delete 'VendorInvoices'"` (Prompts for confirmation before deleting the template directory).
+    `"oh-sheets delete 'ProjectTemplate'"` (Prompts for confirmation before deleting the template directory).
 
 ## Architecture, File Structure & Orchestration
 
@@ -56,7 +56,7 @@ oh-sheets/
 Configurations are grouped by the **Target Output Excel Template** in `~/.oh-sheets/templates/<template-name>/`:
 
 ```
-~/.oh-sheets/templates/VendorInvoices/
+~/.oh-sheets/templates/ProjectTemplate/
 ├── template.xlsx        # The blank target Excel file
 ├── schema.json          # Strict schema mapping JSON keys to Target Excel cells
 ├── rules.md             # Global reference rules for this TARGET template
@@ -71,7 +71,25 @@ Configurations are grouped by the **Target Output Excel Template** in `~/.oh-she
 #### A. Schema Format (`schema.json`)
 The schema strictly maps intermediate JSON keys to Excel cells or ranges, acting as the contract between the extractors and the `excel_writer.py`.
 Format example:
-`{ "B2": {"name": "Invoice_Number", "type": "string"}, "A10:E20": {"name": "Line_Items", "type": "array"} }`
+```
+{
+  "meta": {
+    "version": "2",
+    "signature": "<template_layout_signature>"
+  },
+  "fields": {
+    "Field_A": {"cell": "B2", "type": "string"},
+    "Field_B": {"cell": "B3", "type": "string"},
+    "Field_C": {
+      "relative_to": "Field_B",
+      "row_offset": 0,
+      "col_offset": 1,
+      "type": "string"
+    }
+  }
+}
+```
+`relative_to` records row/column structure so the system can compare template versions before execution.
 
 #### B. Writing Rules (The Script I/O Contract)
 Generated scripts in `extractors/` MUST adhere to:
