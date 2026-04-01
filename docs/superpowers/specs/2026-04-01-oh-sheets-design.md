@@ -26,12 +26,26 @@ To ensure the system has all necessary data to generate a robust script, the ini
     `"oh-sheets list"` (Shows all learned target templates)
     `"oh-sheets delete 'VendorInvoices'"`
 
-## Architecture & Workflow
+## Architecture, File Structure & Orchestration
 
-The system uses a **Unified Routing Architecture** orchestrated by the overarching Agent. The Agent is the smart orchestrator; the generated Python scripts are "dumb," deterministic executors.
+The system relies on two distinct directory structures: the **Extension Source Structure** (the immutable tool itself) and the **Template Storage Structure** (the dynamically generated scripts and rules).
 
-### 1. Template Storage Structure (Local & Private)
-Configurations are grouped by the **Target Output Excel Template**. For each learned target template, the system stores data in `~/.oh-sheets/templates/<template-name>/`:
+### 1. Extension Source Directory (The oh-sheets Tool)
+This is where the plugin/skill itself is installed (e.g., `~/.gemini/extensions/oh-sheets/`).
+
+```
+oh-sheets/
+├── SKILL.md                # The primary agent instructions and routing logic
+├── scripts/                # Immutable core utility scripts
+│   ├── env_check.py        # Validates docling, pandas, openpyxl, etc.
+│   ├── data_diff.py        # The deterministic JSON/CSV diff tool for the RALPH loop
+│   └── excel_writer.py     # The non-destructive openpyxl writer
+└── references/
+    └── prompt_templates.md # Pre-defined LLM prompts for the Sanity Checker and RALPH Loop
+```
+
+### 2. Template Storage Structure (Generated Artifacts)
+Configurations are grouped by the **Target Output Excel Template** in `~/.oh-sheets/templates/<template-name>/`:
 
 ```
 ~/.oh-sheets/templates/VendorInvoices/
@@ -44,58 +58,65 @@ Configurations are grouped by the **Target Output Excel Template**. For each lea
     └── xls_messy_c.py   # Script specifically for Messy Excel format 'C'
 ```
 
-*   **`rules.md` Management:** This reference is specific to the *target template*. It contains semantic mappings (e.g., "The field 'total' must always be a float"). It guides the LLM during fallbacks, regardless of the input type.
-*   **`extractors/` Management:** Scripts are strictly bound to an *input type and layout variant*. A single target template can be fed by many different input types, each with its own generated Python script.
+### 3. Technical Management: Rules for Writing, Calling, and Updating Scripts
 
-### 2. Technical Management & Boundaries
+To ensure the Agent can reliably orchestrate these dynamically generated Python scripts, the system enforces strict rules:
 
-#### The Script I/O Contract
-All scripts in `extractors/` must adhere to a strict I/O contract to ensure the Agent can orchestrate them reliably:
+#### A. Writing Rules (The Script I/O Contract)
+When the internal RALPH loop generates a script in `extractors/`, it MUST adhere to this contract:
 *   **Inputs:** Accept standard CLI arguments: `--input <file_path>` and `--output <json_path>`.
-*   **Outputs:** Must write extracted data to the `<json_path>` strictly matching `schema.json`.
-*   **Exit Codes:** Exit `0` on success. Exit `1` with a clean `stderr` message if parsing fails (e.g., wrong layout).
+*   **Outputs:** Must write extracted data to the `<json_path>` strictly matching the parent directory's `schema.json`.
+*   **Dependencies:** Allowed to use `docling`, `pandas`, `pdf2image`, `re`, `json`.
+*   **Exit Codes:** Exit `0` on success. Exit `1` with a clean `stderr` message if parsing fails (e.g., layout mismatch).
 
-#### Boundary Definition
-If a script exits with a non-zero code or throws an exception, the Agent *catches* it and handles the routing (either trying another variant script or escalating to the LLM Agent Intervention fallback).
+#### B. Calling Rules (Orchestration)
+The Agent (orchestrator) handles the execution. It NEVER calls these scripts blindly.
+1.  **Selection:** Agent inspects the MIME type of the input file. If it's a PDF, it scans the `extractors/` folder for `pdf_variant_*.py` scripts.
+2.  **Execution:** The Agent calls the script using standard bash execution:
+    `python ~/.oh-sheets/templates/VendorInvoices/extractors/pdf_variant_a.py --input /path/to/invoice.pdf --output /tmp/out.json`
+3.  **Boundary & Routing:** If the script returns Exit `0`, the Agent moves to the Sanity Checker. If it returns Exit `1`, the Agent *catches* the error and either calls the next variant script or escalates to LLM Vision Fallback.
 
-### 3. Core Workflows
+#### C. Management Rules (Continuous Improvement)
+*   **`rules.md`:** Governs the *target template*. Updated exclusively by the Agent when it learns a new business rule (e.g., "The 'total' must always be parsed as a float") during either the initial RALPH loop or a Continuous Learning cycle.
+*   **Variant Scripts (`extractors/*.py`):** Immutable once verified by the Test Set. If a new input layout breaks an existing script, the system DOES NOT modify the old script. Instead, it creates a *new* variant script (e.g., `pdf_variant_d.py`) via Workflow D.
+
+### 4. Core Workflows
 
 #### Workflow 0: The Environment Sentinel (Pre-flight Check)
-* **Trigger:** Runs automatically at the start of ANY `oh-sheets` invocation.
+* **Trigger:** Runs automatically via `scripts/env_check.py` at the start of ANY invocation.
 * **Role:** Ensures required packages (`docling`, `pdf2image`, `pandas`, `openpyxl`, `Pillow`) and system dependencies (`poppler`) are installed. Halts with an actionable installation command if missing.
 
 #### Workflow A: The Learner (Adaptive Training via Internal RALPH Loop)
-* **Trigger:** User completes the Interactive Initialization Flow (providing samples and test set).
-* **Note on RALPH Loop:** The Reflect & Fix (RALPH) loop is a *lightweight, internal agentic mechanism* built directly into `oh-sheets!`. It requires zero external tools or installation from the user. It simply uses the LLM to write code, test it, read errors, and rewrite it.
+* **Trigger:** User completes the Interactive Initialization Flow.
+* **Note on RALPH Loop:** A lightweight, internal mechanism. The LLM writes code, tests it using `scripts/data_diff.py`, reads errors, and rewrites it without external frameworks.
 * **Process:**
   1. **Schema Generation:** Agent creates `schema.json` from the provided Target Output Excel.
-  2. **Draft:** Agent drafts an initial variant script (e.g., `pdf_variant_a.py`) based on the input type.
+  2. **Draft:** Agent drafts an initial variant script (e.g., `pdf_variant_a.py`).
   3. **Test:** Agent runs the script on the Test Set Input.
-  4. **Data-Level Diff:** A Python diff tool normalizes outputs to strictly compare *data values* against the Test Set Benchmark Output.
-  5. **Reflect & Fix (Internal RALPH):** Agent automatically reads the diff report, updates the Python script and `rules.md`, and loops until 100% accurate.
+  4. **Data-Level Diff:** `scripts/data_diff.py` strictly compares *data values* against the Test Set Benchmark Output.
+  5. **Reflect & Fix:** Agent automatically reads the diff report, updates the Python script and `rules.md`, and loops until 100% accurate.
 
 #### Workflow B: The Multi-modal Extractor (Execution with Variant Routing)
 * **Trigger:** User provides a new document and specifies the target template.
 * **Process:**
-  1. **Routing:** Agent inspects the input document (MIME type, basic headers) to select the correct Python script from the target template's `extractors/` directory.
-  2. **Deterministic Script Execution:** Executes the script via the strict I/O contract.
-  3. **LLM Agent Intervention (Fallback):** If the script fails (exit `1`) or data is missing:
+  1. **Routing & Execution:** Agent selects the correct script based on input type and calls it via the strict Calling Rules.
+  2. **LLM Agent Intervention (Fallback):** If all appropriate variant scripts fail (exit `1`):
      - *Visual Inputs (PDF/Image/Word):* Convert to images (`pdf2image`), utilize native Vision + `rules.md`.
      - *Data Inputs (Messy Excel):* Bypass Vision. Utilize LLM-driven `pandas` manipulation.
 
 #### Workflow C: The Sanity Checker (Independent LLM Review)
 * **Role:** Semantic validation of the intermediate JSON against common sense and `rules.md`.
-* **Correction:** Outputs either validated JSON OR an array of contextual errors (e.g., `["Row 4: Expected dollar amount, got 'N/A'."]`), feeding back into Workflow B's fallback loop.
+* **Correction:** Outputs either validated JSON OR an array of contextual errors feeding back into Workflow B's fallback loop.
 
 #### Workflow D: The Continuous Learning Trigger
-* **Role:** If Workflow B relies heavily on LLM fallback, it prompts the user: "I had to use LLM fallback for this document format. Should I run an internal background RALPH loop to create a new extractor script variant for this specific input layout?"
+* **Role:** If Workflow B relies on LLM fallback, it prompts: "I had to use LLM fallback for this document format. Should I run an internal RALPH loop to create a new extractor script variant for this layout?" (Generates `pdf_variant_new.py`).
 
 #### Workflow E: The Non-Destructive Writer
-* **Role:** Inject the verified JSON into the blank target Excel using `openpyxl`, preserving all styles, formulas, and macros.
+* **Role:** Calls `scripts/excel_writer.py` to inject the verified JSON into the blank target Excel using `openpyxl`, preserving all styles, formulas, and macros.
 
 ## Phased Implementation Plan
 
 To manage complexity, the development of `oh-sheets!` will be phased:
-*   **Phase 1: Core Deterministic Pipeline.** Implement Workflow 0 (Environment), Workflow A (Learner loop without fallback), straightforward Workflow B (Execution of script), and Workflow E (Non-destructive writer).
+*   **Phase 1: Core Deterministic Pipeline.** Implement Workflow 0 (Environment), Workflow A (Learner loop), Workflow B (Basic Execution), and Workflow E (Non-destructive writer).
 *   **Phase 2: Semantic Resilience.** Implement Workflow B fallback (Vision & Pandas rescue) and Workflow C (Sanity Checker).
-*   **Phase 3: Continuous Evolution.** Implement Workflow D (Continuous Learning / Variant Management) and the full CLI UX management commands (`list`, `delete`).
+*   **Phase 3: Continuous Evolution.** Implement Workflow D (Continuous Learning / Variant Management) and the CLI management commands (`list`, `delete`).
