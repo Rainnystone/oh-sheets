@@ -13,8 +13,9 @@ To ensure the system has all necessary data to generate a robust script, the ini
 1.  **Trigger:** User initiates the learning process: `oh-sheets learn`
 2.  **Workspace Confirmation:** The agent confirms the working directory or prompts the user for the path to the folder containing their files.
 3.  **Sample Data Prompt:** The agent asks for the paths to:
+    - `Blank Base Template` (the empty target Excel file structure)
     - `Sample Input` (e.g., a PDF, an image, or a messy Excel file)
-    - `Sample Target Output` (the specific fixed-format Excel template populated with data from the sample input)
+    - `Sample Target Output` (the base template correctly populated with data from the sample input)
 4.  **Test Set Prompt:** Once samples are provided, the agent *requires* a test set to validate its learning. It prompts for:
     - `Test Set Input` (another instance of the same input type/layout)
     - `Test Set Benchmark Output` (the correctly filled Excel file for the test input)
@@ -70,49 +71,55 @@ When the internal RALPH loop generates a script in `extractors/`, it MUST adhere
 *   **Dependencies:** Allowed to use `docling`, `pandas`, `pdf2image`, `re`, `json`.
 *   **Exit Codes:** Exit `0` on success. Exit `1` with a clean `stderr` message if parsing fails (e.g., layout mismatch).
 
-#### B. Calling Rules (Orchestration)
+#### B. Calling Rules (Orchestration & Variant Routing)
 The Agent (orchestrator) handles the execution. It NEVER calls these scripts blindly.
-1.  **Selection:** Agent inspects the MIME type of the input file. If it's a PDF, it scans the `extractors/` folder for `pdf_variant_*.py` scripts.
-2.  **Execution:** The Agent calls the script using standard bash execution:
+1.  **Selection (LLM Fast Classification):** Agent briefly inspects the document (MIME type and the first few lines of text) and uses a fast LLM classification to match it to a known variant script. 
+2.  **Execution:** The Agent calls the selected script using standard bash execution:
     `python ~/.oh-sheets/templates/VendorInvoices/extractors/pdf_variant_a.py --input /path/to/invoice.pdf --output /tmp/out.json`
-3.  **Boundary & Routing:** If the script returns Exit `0`, the Agent moves to the Sanity Checker. If it returns Exit `1`, the Agent *catches* the error and either calls the next variant script or escalates to LLM Vision Fallback.
+3.  **Boundary & Chain Routing:** If the script returns Exit `1`, the Agent falls back to sequentially testing other variant scripts for that MIME type. To prevent infinite loops, the maximum sequential fallback depth is 3. If all fail, the Agent escalates to LLM Vision Fallback.
 
-#### C. Management Rules (Continuous Improvement)
-*   **`rules.md`:** Governs the *target template*. Updated exclusively by the Agent when it learns a new business rule (e.g., "The 'total' must always be parsed as a float") during either the initial RALPH loop or a Continuous Learning cycle.
+#### C. Management Rules (Continuous Improvement & Structures)
+*   **`rules.md` Format:** Must strictly adhere to defined Markdown sections:
+    - `# Global Rules`: General template requirements (e.g., "All dates must be YYYY-MM-DD").
+    - `# Field Mappings`: Specific quirks for fields (e.g., "The field 'total' is sometimes labeled 'Amount Due' in PDF layouts").
 *   **Variant Scripts (`extractors/*.py`):** Immutable once verified by the Test Set. If a new input layout breaks an existing script, the system DOES NOT modify the old script. Instead, it creates a *new* variant script (e.g., `pdf_variant_d.py`) via Workflow D.
 
 ### 4. Core Workflows
 
 #### Workflow 0: The Environment Sentinel (Pre-flight Check)
 * **Trigger:** Runs automatically via `scripts/env_check.py` at the start of ANY invocation.
-* **Role:** Ensures required packages (`docling`, `pdf2image`, `pandas`, `openpyxl`, `Pillow`) and system dependencies (`poppler`) are installed. Halts with an actionable installation command if missing.
+* **Role:** Ensures required packages (`docling`, `pdf2image`, `pandas`, `openpyxl`, `Pillow`, `litellm`) and system dependencies (`poppler`) are installed. Halts with an actionable installation command if missing.
 
 #### Workflow A: The Learner (Adaptive Training via Internal Custom RALPH Loop)
 * **Trigger:** User completes the Interactive Initialization Flow.
-* **Note on Custom RALPH Loop:** To avoid requiring users to install complex agent frameworks, `oh-sheets!` includes a built-in, lightweight task loop script (`scripts/ralph_loop.py`). This script orchestrates the LLM interaction: prompting the LLM for code, executing the code, running the diff tool, and feeding errors back to the LLM until success or max iterations (e.g., 5) is reached.
+* **Note on Custom RALPH Loop & Platform Adaptation:** `ralph_loop.py` is a lightweight, platform-agnostic orchestrator that uses the `litellm` library. It automatically detects and uses the user's existing environment variables (e.g., `GEMINI_API_KEY` or `ANTHROPIC_API_KEY`). This ensures cross-platform compatibility without requiring deep integration into the host Agent's specific tool-use framework.
 * **Process:**
-  1. **Start Condition:** `ralph_loop.py` is invoked with the Sample Input, Test Set Input, Test Set Benchmark, and initial `prompt_templates.md`.
-  2. **Schema Generation:** LLM creates `schema.json` from the provided Target Output Excel.
-  3. **Draft:** LLM drafts an initial variant script (e.g., `pdf_variant_a.py`).
-  4. **Test:** `ralph_loop.py` runs the drafted script on the Test Set Input.
-  5. **Data-Level Diff:** `scripts/data_diff.py` strictly compares *data values* against the Benchmark Output.
-  6. **Reflect & Fix (The Loop):** `ralph_loop.py` automatically reads the diff report and feeds it back to the LLM to update the Python script and `rules.md`.
-  7. **End Condition:** The loop terminates when `data_diff.py` reports 100% accuracy, OR when max iterations are reached (prompting human intervention).
+  1. **Schema Generation:** LLM analyzes the `Blank Base Template` to create `schema.json`.
+  2. **Draft:** LLM drafts an initial variant script (e.g., `pdf_variant_a.py`).
+  3. **Test:** `ralph_loop.py` runs the drafted script on the Test Set Input.
+  4. **Data-Level Diff:** `scripts/data_diff.py` strictly compares *data values* against the Benchmark Output.
+  5. **Reflect & Fix (The Loop):** `ralph_loop.py` automatically reads the diff report and feeds it back to the LLM to update the Python script and `rules.md`.
+  6. **End Conditions & Error Handling:** 
+     - *Success:* Terminates when `data_diff.py` reports 100% accuracy.
+     - *Mismatch Error:* If max iterations (e.g., 5) are reached, execution halts and prompts the user: *"Extraction failed to converge. Please check if the Sample Input actually contains all the data required by the Target Output."*
 
 #### Workflow B: The Multi-modal Extractor (Execution with Variant Routing)
 * **Trigger:** User provides a new document and specifies the target template.
 * **Process:**
-  1. **Routing & Execution:** Agent selects the correct script based on input type and calls it via the strict Calling Rules.
-  2. **LLM Agent Intervention (Fallback):** If all appropriate variant scripts fail (exit `1`):
+  1. **Routing & Execution:** Agent selects the correct script via LLM Fast Classification and calls it.
+  2. **LLM Agent Intervention (Fallback):** If the script fails and max fallback depth is reached:
      - *Visual Inputs (PDF/Image/Word):* Convert to images (`pdf2image`), utilize native Vision + `rules.md`.
      - *Data Inputs (Messy Excel):* Bypass Vision. Utilize LLM-driven `pandas` manipulation.
+     - *Fatal Error:* If Vision/LLM fallback itself fails to find the data, the process halts and notifies the user that manual data entry is required.
 
 #### Workflow C: The Sanity Checker (Independent LLM Review)
 * **Role:** Semantic validation of the intermediate JSON against common sense and `rules.md`.
-* **Correction:** Outputs either validated JSON OR an array of contextual errors feeding back into Workflow B's fallback loop.
+* **Correction Loop:** Outputs either validated JSON OR an array of contextual errors feeding back into Workflow B's fallback loop. 
+* **Loop Limit:** To prevent endless looping, the B → C → B loop is capped at a maximum of 3 attempts. If it fails on the 3rd attempt, execution halts for human intervention.
 
 #### Workflow D: The Continuous Learning Trigger
-* **Role:** If Workflow B relies on LLM fallback, it prompts: "I had to use LLM fallback for this document format. Should I run an internal RALPH loop to create a new extractor script variant for this layout?" (Generates `pdf_variant_new.py`).
+* **Role:** If Workflow B relies heavily on LLM fallback, it prompts: "I had to use LLM fallback for this document format. Should I run an internal RALPH loop to create a new extractor script variant for this layout?" 
+* **Requirement:** To run this loop safely for the new layout variant, the system *must* pause and ask the user to provide a verified Test Set Benchmark Output for this specific new document before proceeding.
 
 #### Workflow E: The Non-Destructive Writer
 * **Role:** Calls `scripts/excel_writer.py` to inject the verified JSON into the blank target Excel using `openpyxl`, preserving all styles, formulas, and macros.
