@@ -38,6 +38,7 @@ oh-sheets/
 ├── SKILL.md                # The primary agent instructions and routing logic
 ├── scripts/                # Immutable core utility scripts
 │   ├── env_check.py        # Validates docling, pandas, openpyxl, etc.
+│   ├── ralph_loop.py       # A lightweight, custom task loop orchestrator specifically for training
 │   ├── data_diff.py        # The deterministic JSON/CSV diff tool for the RALPH loop
 │   └── excel_writer.py     # The non-destructive openpyxl writer
 └── references/
@@ -86,15 +87,17 @@ The Agent (orchestrator) handles the execution. It NEVER calls these scripts bli
 * **Trigger:** Runs automatically via `scripts/env_check.py` at the start of ANY invocation.
 * **Role:** Ensures required packages (`docling`, `pdf2image`, `pandas`, `openpyxl`, `Pillow`) and system dependencies (`poppler`) are installed. Halts with an actionable installation command if missing.
 
-#### Workflow A: The Learner (Adaptive Training via Internal RALPH Loop)
+#### Workflow A: The Learner (Adaptive Training via Internal Custom RALPH Loop)
 * **Trigger:** User completes the Interactive Initialization Flow.
-* **Note on RALPH Loop:** A lightweight, internal mechanism. The LLM writes code, tests it using `scripts/data_diff.py`, reads errors, and rewrites it without external frameworks.
+* **Note on Custom RALPH Loop:** To avoid requiring users to install complex agent frameworks, `oh-sheets!` includes a built-in, lightweight task loop script (`scripts/ralph_loop.py`). This script orchestrates the LLM interaction: prompting the LLM for code, executing the code, running the diff tool, and feeding errors back to the LLM until success or max iterations (e.g., 5) is reached.
 * **Process:**
-  1. **Schema Generation:** Agent creates `schema.json` from the provided Target Output Excel.
-  2. **Draft:** Agent drafts an initial variant script (e.g., `pdf_variant_a.py`).
-  3. **Test:** Agent runs the script on the Test Set Input.
-  4. **Data-Level Diff:** `scripts/data_diff.py` strictly compares *data values* against the Test Set Benchmark Output.
-  5. **Reflect & Fix:** Agent automatically reads the diff report, updates the Python script and `rules.md`, and loops until 100% accurate.
+  1. **Start Condition:** `ralph_loop.py` is invoked with the Sample Input, Test Set Input, Test Set Benchmark, and initial `prompt_templates.md`.
+  2. **Schema Generation:** LLM creates `schema.json` from the provided Target Output Excel.
+  3. **Draft:** LLM drafts an initial variant script (e.g., `pdf_variant_a.py`).
+  4. **Test:** `ralph_loop.py` runs the drafted script on the Test Set Input.
+  5. **Data-Level Diff:** `scripts/data_diff.py` strictly compares *data values* against the Benchmark Output.
+  6. **Reflect & Fix (The Loop):** `ralph_loop.py` automatically reads the diff report and feeds it back to the LLM to update the Python script and `rules.md`.
+  7. **End Condition:** The loop terminates when `data_diff.py` reports 100% accuracy, OR when max iterations are reached (prompting human intervention).
 
 #### Workflow B: The Multi-modal Extractor (Execution with Variant Routing)
 * **Trigger:** User provides a new document and specifies the target template.
@@ -117,6 +120,6 @@ The Agent (orchestrator) handles the execution. It NEVER calls these scripts bli
 ## Phased Implementation Plan
 
 To manage complexity, the development of `oh-sheets!` will be phased:
-*   **Phase 1: Core Deterministic Pipeline.** Implement Workflow 0 (Environment), Workflow A (Learner loop), Workflow B (Basic Execution), and Workflow E (Non-destructive writer).
+*   **Phase 1: Core Deterministic Pipeline.** Implement Workflow 0 (Environment), Workflow A (Learner loop including `ralph_loop.py`), Workflow B (Basic Execution), and Workflow E (Non-destructive writer).
 *   **Phase 2: Semantic Resilience.** Implement Workflow B fallback (Vision & Pandas rescue) and Workflow C (Sanity Checker).
 *   **Phase 3: Continuous Evolution.** Implement Workflow D (Continuous Learning / Variant Management) and the CLI management commands (`list`, `delete`).
