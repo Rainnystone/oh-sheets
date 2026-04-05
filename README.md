@@ -4,21 +4,22 @@
 
 **oh-sheets!** is an open-source, meta-skill extension for coding agents (like Gemini CLI, Claude Code) designed to solve the painful task of extracting unstructured or semi-structured data (from PDFs, Images, Word docs, or messy Excel files) into strict, fixed-format Excel templates.
 
-Instead of hardcoding brittle regex rules, `oh-sheets!` learns from user-provided examples through an adaptive **RALPH (Reflect & Fix)** loop. It autonomously generates specialized, deterministic Python extraction scripts and knowledge references for each of your specific target templates.
+Instead of relying on brittle regex rules or hardcoded scripts, `oh-sheets! v2` introduces a dynamic **Semantic Reference Bank**. It learns from user-provided examples through an adaptive **RALPH (Reflect & Fix)** loop, autonomously building a structured knowledge graph of anchors, rules, and success patterns to guide LLM-first data extraction.
 
 ## 🚀 What it is & Why it exists
 
 Data extraction into Excel often involves brittle scripts that break when source layouts change. `oh-sheets!` acts as the orchestrator:
-- **Zero-Config Learning:** Show it a sample input and your desired filled Excel template. It writes its own extraction code.
+- **Zero-Config Learning:** Show it a sample input and your desired filled Excel template. It learns the semantic structure and creates its own extraction rules.
+- **LLM-First Execution:** Uses LLMs with a rich context payload (few-shot rules, spatial anchors, formula constraints) to semantically extract data, making it highly resilient to layout changes.
 - **Non-Destructive:** Uses `openpyxl` to inject data without destroying your template's styling, formulas, or macros.
-- **Vision Fallback & Sanity Checking:** If a deterministic script fails due to an unexpected layout change, it gracefully falls back to native Vision capabilities and semantic reasoning to ensure data integrity.
+- **Rule Evolution:** The system continuously learns. Successful extractions boost rule confidence, failed ones penalize them, and unused rules decay over time.
 
 ## 🛠 Prerequisites & Environment
 
 Before running `oh-sheets!`, ensure your environment has the necessary tools. The built-in `Environment Sentinel` will automatically check for these upon invocation.
 
 - **Python 3.x**
-- **Python Packages:** `docling`, `pdf2image`, `pandas`, `openpyxl`, `Pillow`
+- **Python Packages:** `docling`, `pdf2image`, `pandas`, `openpyxl`, `Pillow`, `google-genai` (or equivalent SDK)
 - **System Dependencies:** `poppler` (Required for PDF-to-image conversion)
   - macOS: `brew install poppler`
   - Ubuntu/Debian: `sudo apt-get install poppler-utils`
@@ -36,11 +37,11 @@ The agent will interactively prompt you for:
 1. **Template Name:** (e.g., `ProjectTemplate`)
 2. **Blank Base Template:** The empty target Excel file.
 3. **Sample Input & Target Output:** A sample PDF/Image and the perfectly filled Excel file based on that input.
-4. **Test Set:** A secondary set of files to validate the generated code.
+4. **Test Set:** A secondary set of files to validate the learned rules.
 
-The Agent will run its internal **RALPH Loop**, writing, testing, and refining a Python extractor script until it achieves 100% data match against your Test Set.
+The Agent will run its internal **RALPH Loop**, identifying spatial anchors, drafting extraction rules, testing them, and refining its knowledge graph until it achieves 100% data match against your Test Set.
 
-`schema.json` can now record row/column relations between fields using `relative_to`, `row_offset`, and `col_offset` so future template versions can be compared and migrated by structure rather than raw cell positions alone.
+`schema.json` acts as the contract, defining field types and automatically extracting formula constraints (e.g., protecting `=SUM(A1:A5)`) so the LLM never overwrites calculated cells.
 
 ### 2. Daily Execution
 Once trained, use the unified routing command for your daily tasks:
@@ -58,11 +59,14 @@ Delete a template:
 oh-sheets delete 'ProjectTemplate'
 ```
 
-## 🧠 Deep Dive: Handling Diverse Excel Needs
+## 🧠 Deep Dive: The Semantic Reference Bank (v2)
 
-Dealing with five different PDF layouts mapped to the same Excel template? Here's how `oh-sheets!` handles the chaos:
+Dealing with diverse PDF layouts mapped to the same Excel template? Here's how `oh-sheets! v2` handles the chaos:
 
-1. **Variant Isolation:** Scripts are generated and bound to an *input type and layout variant*. If you feed the system 3 different PDF formats for the same template, it generates `pdf_variant_1.py`, `pdf_variant_2.py`, etc., cleanly organizing them in `~/.oh-sheets/templates/<name>/extractors/`.
-2. **Schema & Global Rules:** For every target template, a strict `schema.json` acts as the mapping contract. A `rules.md` file holds global logic (e.g., "The total must always be parsed as a float").
-3. **Multi-modal Fallback:** If a layout changes and the deterministic Python script throws an error (`Exit 1`), the Agent catches it. It sequentially tests other known variants. If all fail, it seamlessly converts the document to images and uses Native LLM Vision to extract the data based on your `rules.md`.
-4. **Continuous Learning:** If the Vision fallback was used, the Agent will prompt: *"I had to use LLM fallback. Should I learn this new layout in the background?"*
+1. **Structured Memory:** Instead of a simple `rules.md` file, knowledge is split into explicit components under `~/.oh-sheets/templates/<name>/reference_bank/`:
+   - `anchors.json`: Spatial and visual locators (e.g., "The vendor name is always below the string 'Vendor:'").
+   - `rules.jsonl`: Structured predicate rules mapping conditions to extraction strategies.
+   - `success_patterns.jsonl`: MD5 signatures of known successful document layouts to fast-track processing.
+   - `knowledge_graph.json`: Tracks the relationships and dependencies between different rules and anchors.
+2. **Dynamic Evolution:** When `oh-sheets!` successfully extracts a document, the `learning_orchestrator` boosts the `confidence` score of the rules used. If validation fails (e.g., missing a required field), the rules are penalized. Rules that drop below a confidence threshold (0.3) are automatically archived, ensuring the system doesn't get bloated with outdated logic.
+3. **Validation & Feedback:** The orchestrator strictly validates the LLM's output against the `schema.json` contract before writing to Excel. If data is missing or malformed, the failure is logged to `execution_log.jsonl` and fed back into the RALPH loop for immediate reflection and repair.
