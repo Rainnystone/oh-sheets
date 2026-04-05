@@ -86,3 +86,139 @@ Dealing with diverse PDF layouts mapped to the same Excel template? Here's how `
    - `knowledge_graph.json`: Tracks the relationships and dependencies between different rules and anchors.
 2. **Dynamic Evolution:** When `oh-sheets!` successfully extracts a document, the `learning_orchestrator` boosts the `confidence` score of the rules used. If validation fails (e.g., missing a required field), the rules are penalized. Rules that drop below a confidence threshold (0.3) are automatically archived, ensuring the system doesn't get bloated with outdated logic.
 3. **Validation & Feedback:** The orchestrator strictly validates the LLM's output against the `schema.json` contract before writing to Excel. If data is missing or malformed, the failure is logged to `execution_log.jsonl` and fed back into the RALPH loop for immediate reflection and repair.
+
+## 🔄 RALPH Loop v2: 5-Phase Learning Cycle
+
+The learning orchestrator implements a complete **RALPH (Reflect & Fix)** loop with 5 phases:
+
+| Phase | Description |
+|-------|-------------|
+| **1. ANALYZE** | LLM analyzes sample input + target Excel → generates anchors, schema, identifies formulas |
+| **2. DRAFT** | Creates initial rules based on anchors, builds knowledge graph |
+| **3. TEST** | Executes extraction using LLM + Reference Bank, validates against schema |
+| **4. COMMIT** | On success: records success_pattern, boosts rule confidence |
+| **5. REFLECT** | On failure: analyzes error, generates/updates rules, retries (max 5 attempts) |
+
+### Degradation Strategy
+
+When extraction fails, the system automatically degrades through 4 levels:
+
+```
+Level 1: LLM + Reference Bank (full semantic extraction)
+    ↓ failed
+Level 2: LLM + Anchors only (reduced rule dependency)
+    ↓ failed
+Level 3: Deterministic extractors (if available in extractors/)
+    ↓ failed
+Level 4: Request user intervention
+```
+
+### Formula Protection
+
+The system automatically:
+- Analyzes Excel templates to identify formula cells (`=SUM()`, `=IF()`, etc.)
+- Protects formula cells from being overwritten during extraction
+- Uses formula dependencies for validation
+
+## 📁 Directory Structure
+
+```
+oh-sheets!/
+├── SKILL.md                          # Skill definition for AI agents
+├── README.md                         # English documentation
+├── README_zh.md                      # Chinese documentation
+│
+├── scripts/
+│   ├── core/                         # Core modules
+│   │   ├── reference_bank.py         # Reference Bank CRUD operations
+│   │   ├── rule_evolution.py         # Rule confidence update & decay
+│   │   ├── prompt_builder.py         # LLM prompt construction
+│   │   └── signature_matcher.py      # MD5 signature & pattern matching
+│   │
+│   ├── extraction/                   # Extraction modules
+│   │   ├── llm_extractor.py          # LLM extraction (google-genai)
+│   │   └── formula_analyzer.py       # Excel formula analysis
+│   │
+│   ├── io/                           # Input/Output
+│   │   ├── excel_writer.py           # Non-destructive Excel writing
+│   │   └── data_diff.py              # Data comparison & validation
+│   │
+│   ├── memory/                       # Memory system
+│   │   └── local_few_shot_memory.py  # Few-shot example storage
+│   │
+│   ├── orchestration/                # Orchestration layer
+│   │   ├── execution_orchestrator.py # Main extraction flow
+│   │   └── learning_orchestrator.py  # RALPH Loop implementation
+│   │
+│   └── utils/                        # Utilities
+│       ├── template_layout_signature.py
+│       └── env_check.py
+│
+├── references/
+│   ├── prompt_templates.md           # Prompt templates
+│   └── config_schema.md              # Configuration schema
+│
+├── docs/
+│   └── superpowers/specs/            # Design specifications
+│
+├── tests/                            # Test suite (mirrors scripts/)
+│   ├── core/
+│   ├── extraction/
+│   ├── io/
+│   ├── memory/
+│   ├── orchestration/
+│   └── utils/
+│
+└── examples/                         # Example templates
+```
+
+### Template Directory Structure
+
+Each learned template is stored under `~/.oh-sheets/templates/<name>/`:
+
+```
+~/.oh-sheets/templates/<template-name>/
+├── template.xlsx                    # Target Excel template
+├── schema.json                      # Field mapping contract
+├── reference_bank/                  # Semantic Reference Bank
+│   ├── anchors.json                 # Spatial/visual locators
+│   ├── rules.jsonl                  # Extraction rules
+│   ├── success_patterns.jsonl       # Known successful layouts
+│   └── knowledge_graph.json         # Rule relationships
+├── extractors/                      # Optional deterministic scripts
+│   └── *.py
+└── memory/                          # Execution memory
+    ├── execution_log.jsonl          # Execution history
+    ├── failure_clusters.json        # Failure patterns
+    └── summary_rules.json           # Rule summaries
+```
+
+## 🔧 Configuration
+
+### schema.json Structure
+
+```json
+{
+  "meta": {
+    "signature": "abc123...",
+    "version": "2.0"
+  },
+  "fields": {
+    "Field_A": {"cell": "B2", "type": "string", "required": true},
+    "Field_B": {"cell": "B3", "type": "number"}
+  },
+  "formula_constraints": [
+    {"cell": "D5", "formula": "=SUM(D2:D4)", "depends_on": ["D2", "D3", "D4"]}
+  ]
+}
+```
+
+### Rule Structure (rules.jsonl)
+
+```jsonl
+{"id":"R001","when":{"input_type":"pdf"},"condition":{"field":"vendor_name"},"then":{"action":"extract_after_anchor"},"confidence":0.92,"support":5}
+```
+
+## 📜 License
+
+MIT License - See [LICENSE](LICENSE) for details.
