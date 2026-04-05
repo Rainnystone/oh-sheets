@@ -54,3 +54,7 @@ Your previous script failed the `data_diff.py` check.
 Here is the error output from `data_diff.py`.
 
 Please rewrite the extractor script to fix these errors. Update `rules.md` if you discover a new global rule or field mapping quirk.
+
+## REFLECT Phase (Reference Bank v2)
+- Input: execution logs, error fields, feedback signal
+- Output: Generate rules in rules.jsonl, extract success cases to success_patterns.jsonl
