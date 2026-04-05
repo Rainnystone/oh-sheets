@@ -276,3 +276,67 @@ if __name__ == "__main__":
         # Should succeed with degradation
         assert payload["status"] in ["success", "degraded"]
         assert payload.get("degraded_level") == 2 or "degraded" in payload.get("message", "")
+
+
+def test_formula_conflict_detection():
+    """Test that formula cells are detected and protected from being overwritten."""
+    with tempfile.TemporaryDirectory() as workdir:
+        template_dir = Path(workdir)
+        template_path = template_dir / "template.xlsx"
+        schema_path = template_dir / "schema.json"
+        input_path = template_dir / "input.dat"
+        output_path = template_dir / "out.xlsx"
+
+        # Create template with formula
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["B2"] = ""  # Field_A cell
+        ws["D5"] = "=SUM(D2:D4)"  # Formula cell - should not be overwritten
+        wb.save(template_path)
+
+        schema = {
+            "meta": {"version": "2", "signature": "abc"},
+            "fields": {
+                "Field_A": {"cell": "B2", "type": "string"},
+                "Field_B": {"cell": "D5", "type": "number"}  # This targets a formula cell
+            }
+        }
+        with open(schema_path, "w") as f:
+            json.dump(schema, f)
+
+        input_path.write_text("test content")
+
+        mock_extractor_path = template_dir / "mock_extractor.py"
+        mock_extractor_content = """import sys, json
+import scripts.orchestration.execution_orchestrator as eo
+import scripts.io.excel_writer
+
+def mock_extract(prompt):
+    # Returns data that includes Field_B which targets a formula cell
+    return {"Field_A": "Test Value", "Field_B": 100}
+
+eo.extract_data = mock_extract
+scripts.io.excel_writer.write_excel = lambda t, d, s, o: open(o, "w").write("dummy excel")
+
+if __name__ == "__main__":
+    class Args:
+        template_dir = sys.argv[1]
+        input = sys.argv[2]
+        output = sys.argv[3]
+    sys.exit(eo.run_orchestrator(Args()))
+"""
+        mock_extractor_path.write_text(mock_extractor_content)
+
+        result = subprocess.run(
+            [sys.executable, str(mock_extractor_path), str(template_dir), str(input_path), str(output_path)],
+            capture_output=True,
+            text=True,
+            env={"PYTHONPATH": ".", **os.environ}
+        )
+
+        payload = json.loads(result.stdout)
+        # Should warn about formula conflict
+        assert payload["status"] in ["success", "degraded"]
+        # Check that formula conflict is detected
+        assert payload.get("formula_conflict") == True or "formula" in payload.get("message", "").lower()

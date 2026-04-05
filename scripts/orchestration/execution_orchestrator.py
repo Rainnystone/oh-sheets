@@ -7,7 +7,7 @@ from pathlib import Path
 from scripts.core.reference_bank import ReferenceBank
 from scripts.core.prompt_builder import build_context_prompt
 from scripts.core.signature_matcher import match_patterns, calculate_signature
-from scripts.extraction.formula_analyzer import extract_formulas_from_schema
+from scripts.extraction.formula_analyzer import extract_formulas_from_schema, analyze_workbook_formulas
 from scripts.extraction.llm_extractor import extract_data
 from scripts.io.excel_writer import write_excel
 from scripts.core.rule_evolution import update_rule_confidence
@@ -147,7 +147,7 @@ def run_orchestrator(args):
     # Validation Phase
     expected_fields = _read_schema_field_names(schema)
     missing_fields = [field for field in expected_fields if field not in extracted]
-    
+
     if missing_fields:
         error_msg = "Extracted data missing required fields."
         result = {
@@ -165,6 +165,26 @@ def run_orchestrator(args):
             "input_signature": input_sig
         })
         return 1
+
+    # Formula conflict detection
+    formula_conflicts = []
+    try:
+        template_formulas = analyze_workbook_formulas(str(template_dir / "template.xlsx"))
+        formula_cells = {f["cell"] for f in template_formulas}
+
+        # Check if any schema field maps to a formula cell
+        for field_name, field_spec in schema.get("fields", {}).items():
+            if isinstance(field_spec, dict):
+                cell = field_spec.get("cell", "")
+                if cell in formula_cells and field_name in extracted:
+                    formula_conflicts.append({
+                        "field": field_name,
+                        "cell": cell
+                    })
+                    # Remove from extracted data to prevent overwriting formula
+                    del extracted[field_name]
+    except Exception:
+        pass  # If formula analysis fails, continue without conflict detection
     
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
         json.dump(extracted, tmp, ensure_ascii=False, indent=2)
@@ -219,6 +239,10 @@ def run_orchestrator(args):
     bank.save_success_patterns(patterns)
 
     result = {"status": "success", "output": str(args.output)}
+    if formula_conflicts:
+        result["formula_conflict"] = True
+        result["conflicts"] = formula_conflicts
+        result["message"] = f"Formula cells protected: {[c['cell'] for c in formula_conflicts]}"
     if degraded_level > 1:
         result["status"] = "degraded"
         result["degraded_level"] = degraded_level
