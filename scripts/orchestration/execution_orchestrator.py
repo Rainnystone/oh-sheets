@@ -25,7 +25,7 @@ def _read_schema_field_names(schema):
 def run_orchestrator(args):
     template_dir = Path(args.template_dir).expanduser()
     schema_path = template_dir / "schema.json"
-    memory_dir = Path("memory")
+    memory_dir = template_dir / "memory"
     
     with open(schema_path, "r", encoding="utf-8") as f:
         schema = json.load(f)

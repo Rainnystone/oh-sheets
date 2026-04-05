@@ -115,3 +115,52 @@ if __name__ == "__main__":
         assert result.returncode == 0
         payload = json.loads(result.stdout)
         assert payload["status"] == "success"
+
+
+def test_memory_dir_uses_template_dir():
+    """Test that execution log is written to template_dir/memory, not hardcoded 'memory'."""
+    with tempfile.TemporaryDirectory() as workdir:
+        template_dir = Path(workdir)
+        template_path = template_dir / "template.xlsx"
+        schema_path = template_dir / "schema.json"
+        input_path = template_dir / "input.dat"
+        output_path = template_dir / "out.xlsx"
+
+        _write_template(template_path)
+        _write_schema(schema_path)
+        input_path.write_text("dummy content")
+
+        mock_extractor_path = template_dir / "mock_extractor.py"
+        mock_extractor_content = """import sys, json
+import scripts.orchestration.execution_orchestrator as eo
+import scripts.io.excel_writer
+
+def mock_extract(prompt):
+    return {"Field_A": "A", "Field_B": "B"}
+
+eo.extract_data = mock_extract
+scripts.io.excel_writer.write_excel = lambda t, d, s, o: open(o, "w").write("dummy excel")
+
+if __name__ == "__main__":
+    class Args:
+        template_dir = sys.argv[1]
+        input = sys.argv[2]
+        output = sys.argv[3]
+    sys.exit(eo.run_orchestrator(Args()))
+"""
+        mock_extractor_path.write_text(mock_extractor_content)
+
+        result = subprocess.run(
+            [sys.executable, str(mock_extractor_path), str(template_dir), str(input_path), str(output_path)],
+            capture_output=True,
+            text=True,
+            env={"PYTHONPATH": ".", **os.environ}
+        )
+
+        # Execution log should be in template_dir/memory, not in cwd/memory
+        expected_log_path = template_dir / "memory" / "execution_log.jsonl"
+        assert expected_log_path.exists(), f"Expected log at {expected_log_path}"
+
+        # Should NOT exist in cwd/memory
+        cwd_memory_path = Path("memory") / "execution_log.jsonl"
+        assert not cwd_memory_path.exists(), "Memory should not be written to cwd/memory"
