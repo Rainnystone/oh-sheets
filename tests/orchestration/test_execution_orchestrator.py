@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from scripts.template_layout_signature import build_template_profile
+from scripts.utils.template_layout_signature import build_template_profile
 
 
 def _write_template(path: Path):
@@ -39,7 +39,7 @@ def _write_extractor(path: Path, payload: dict):
 def _run_orchestrator(template_dir: Path, input_path: Path, extractor_path: Path, output_path: Path, expected_path: Path = None, profile: Path = None, min_support: int = 2):
     cmd = [
         "python3",
-        "scripts/execution_orchestrator.py",
+        "scripts/orchestration/execution_orchestrator.py",
         "--template-dir", str(template_dir),
         "--input", str(input_path),
         "--extractor", str(extractor_path),
@@ -78,7 +78,7 @@ def test_signature_mismatch_blocks_and_logs_to_memory():
 
         result = subprocess.run(
             [
-                "python3", "scripts/execution_orchestrator.py",
+                "python3", "scripts/orchestration/execution_orchestrator.py",
                 "--template-dir", str(template_dir),
                 "--input", str(input_path),
                 "--extractor", str(extractor_path),
@@ -159,7 +159,7 @@ def test_successful_run_writes_output_and_passes_signature_guard():
         with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(expected_payload, f)
         subprocess.check_call([
-            "python3", "scripts/excel_writer.py",
+            "python3", "scripts/io/excel_writer.py",
             "--template", str(template_path),
             "--data", str(temp_path),
             "--schema", str(schema_path),

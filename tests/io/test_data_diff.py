@@ -9,7 +9,7 @@ def test_data_diff():
     df1.to_excel('test_gen.xlsx', index=False)
     df2.to_excel('test_bench.xlsx', index=False)
     
-    result = subprocess.run(['python', 'scripts/data_diff.py', '--generated', 'test_gen.xlsx', '--benchmark', 'test_bench.xlsx'], capture_output=True, text=True)
+    result = subprocess.run(['python', 'scripts/io/data_diff.py', '--generated', 'test_gen.xlsx', '--benchmark', 'test_bench.xlsx'], capture_output=True, text=True)
     
     os.remove('test_gen.xlsx')
     os.remove('test_bench.xlsx')

@@ -19,7 +19,7 @@ def test_excel_writer():
     with open('test_schema.json', 'w') as f:
         json.dump(schema, f)
         
-    result = subprocess.run(['python', 'scripts/excel_writer.py', '--template', 'test_template.xlsx', '--data', 'test_data.json', '--schema', 'test_schema.json', '--output', 'test_out.xlsx'])
+    result = subprocess.run(['python', 'scripts/io/excel_writer.py', '--template', 'test_template.xlsx', '--data', 'test_data.json', '--schema', 'test_schema.json', '--output', 'test_out.xlsx'])
     
     assert result.returncode == 0
     
@@ -58,7 +58,7 @@ def test_excel_writer_with_semantic_layout():
     with open('test_schema.json', 'w') as f:
         json.dump(schema, f)
 
-    result = subprocess.run(['python', 'scripts/excel_writer.py', '--template', 'test_template.xlsx', '--data', 'test_data.json', '--schema', 'test_schema.json', '--output', 'test_out.xlsx'])
+    result = subprocess.run(['python', 'scripts/io/excel_writer.py', '--template', 'test_template.xlsx', '--data', 'test_data.json', '--schema', 'test_schema.json', '--output', 'test_out.xlsx'])
     assert result.returncode == 0
 
     wb_out = openpyxl.load_workbook('test_out.xlsx')

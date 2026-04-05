@@ -2,7 +2,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from scripts.local_few_shot_memory import record_execution, rebuild_failure_summary, suggest_repairs
+from scripts.memory.local_few_shot_memory import record_execution, rebuild_failure_summary, suggest_repairs
 
 
 def _tmp_mem_dir():

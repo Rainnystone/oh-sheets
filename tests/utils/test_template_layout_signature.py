@@ -21,7 +21,7 @@ def test_template_layout_signature():
     _build_template_for_test(template)
 
     result = subprocess.run(
-        ['python', 'scripts/template_layout_signature.py', '--template', template, '--output', profile],
+        ['python', 'scripts/utils/template_layout_signature.py', '--template', template, '--output', profile],
         capture_output=True,
         text=True,
     )
@@ -36,7 +36,7 @@ def test_template_layout_signature():
     assert any(cell['cell'] == 'A1' for cell in data['cell_graph'])
 
     result_repeat = subprocess.run(
-        ['python', 'scripts/template_layout_signature.py', '--template', template, '--output', profile],
+        ['python', 'scripts/utils/template_layout_signature.py', '--template', template, '--output', profile],
         capture_output=True,
         text=True,
     )

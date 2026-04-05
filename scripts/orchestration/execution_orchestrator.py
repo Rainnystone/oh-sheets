@@ -5,9 +5,9 @@ import sys
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from scripts.excel_writer import write_excel
-from scripts.local_few_shot_memory import record_execution, rebuild_failure_summary, suggest_repairs
-from scripts.template_layout_signature import build_template_profile, compare_layout_profiles
+from scripts.io.excel_writer import write_excel
+from scripts.memory.local_few_shot_memory import record_execution, rebuild_failure_summary, suggest_repairs
+from scripts.utils.template_layout_signature import build_template_profile, compare_layout_profiles
 
 
 def _load_json(path, default=None):
@@ -265,7 +265,7 @@ def run_template_orchestrator(args):
     generated_json.unlink(missing_ok=True)
 
     if args.expected:
-        diff_result = subprocess.run([sys.executable, "scripts/data_diff.py", "--generated", str(output_path), "--benchmark", str(args.expected)], capture_output=True, text=True)
+        diff_result = subprocess.run([sys.executable, "scripts/io/data_diff.py", "--generated", str(output_path), "--benchmark", str(args.expected)], capture_output=True, text=True)
         if diff_result.returncode != 0:
             event = {
                 "template_signature": signature_check.get("candidate_signature", ""),
