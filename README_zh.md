@@ -24,15 +24,37 @@
   - macOS: `brew install poppler`
   - Ubuntu/Debian: `sudo apt-get install poppler-utils`
 
+## 📦 安装
+
+因为 `oh-sheets!` 是一个智能体元技能扩展，所以您需要通过将其克隆到智能体的扩展/技能目录中来完成安装。
+
+### 对于 Gemini CLI
+```bash
+# 将本仓库克隆到您的扩展目录中
+git clone https://github.com/Rainnystone/oh-sheets.git ~/.gemini/extensions/oh-sheets
+
+# 安装必需的 Python 依赖包
+pip install docling pdf2image pandas openpyxl Pillow google-genai
+```
+
+### 对于 Claude Code
+```bash
+# 克隆到您的全局或项目特定的技能目录中
+git clone https://github.com/Rainnystone/oh-sheets.git ~/.claude/skills/oh-sheets
+
+# 安装必需的 Python 依赖包
+pip install docling pdf2image pandas openpyxl Pillow google-genai
+```
+
 ## 📖 如何使用
 
-工作流分为两个阶段：**学习阶段** 和 **日常执行阶段**。
+由于 `oh-sheets!` 是一项元技能，您不需要运行传统的 CLI 可执行文件。相反，您应该**与您的 AI 智能体对话**（Gemini CLI，Claude Code）并要求它调用此技能。
 
 ### 1. 交互式学习流程
-要教会 `oh-sheets!` 处理一个新模板，只需运行：
-```bash
-oh-sheets learn
-```
+要教会 `oh-sheets!` 处理一个新模板，只需告诉您的智能体：
+> "使用 oh-sheets 技能学习一个新模板"
+*(或概念上触发 `oh-sheets learn`)*
+
 智能体将交互式地向您询问：
 1. **模板命名：** (例如 `ProjectTemplate`)
 2. **空白基础模板：** 目标 Excel 文件的空表。
@@ -44,20 +66,14 @@ oh-sheets learn
 `schema.json` 作为严格的契约，定义字段类型并自动提取公式约束（例如保护 `=SUM(A1:A5)` 单元格），从而确保大模型绝对不会覆盖您的计算公式。
 
 ### 2. 日常执行
-训练完成后，使用统一命令进行日常数据提取：
-```bash
-oh-sheets extract --template 'ProjectTemplate' --input source_file.pdf --output out.xlsx
-```
+训练完成后，让您的智能体执行日常数据提取任务：
+> "使用 oh-sheets 将 source_file.pdf 中的数据提取到 ProjectTemplate 中"
+*(或概念上触发 `oh-sheets extract --template 'ProjectTemplate' --input source_file.pdf --output out.xlsx`)*
 
 ### 3. 模板管理
-列出所有已学习的模板：
-```bash
-oh-sheets list
-```
-删除指定模板：
-```bash
-oh-sheets delete 'ProjectTemplate'
-```
+您也可以让智能体管理您的模板：
+> "列出所有已学习的 oh-sheets 模板"  
+> "从 oh-sheets 中删除 ProjectTemplate"
 
 ## 🧠 深度解析：语义参考库 v2 (Semantic Reference Bank)
 

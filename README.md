@@ -24,15 +24,37 @@ Before running `oh-sheets!`, ensure your environment has the necessary tools. Th
   - macOS: `brew install poppler`
   - Ubuntu/Debian: `sudo apt-get install poppler-utils`
 
+## 📦 Installation
+
+Since `oh-sheets!` is an AI agent meta-skill extension, you install it by cloning this repository into your agent's extension/skills directory.
+
+### For Gemini CLI
+```bash
+# Clone the repository into your extensions directory
+git clone https://github.com/Rainnystone/oh-sheets.git ~/.gemini/extensions/oh-sheets
+
+# Install required Python dependencies
+pip install docling pdf2image pandas openpyxl Pillow google-genai
+```
+
+### For Claude Code
+```bash
+# Clone into your global or project-specific skills directory
+git clone https://github.com/Rainnystone/oh-sheets.git ~/.claude/skills/oh-sheets
+
+# Install required Python dependencies
+pip install docling pdf2image pandas openpyxl Pillow google-genai
+```
+
 ## 📖 How to Use
 
-The workflow is divided into two phases: **Learning** and **Daily Execution**.
+Because `oh-sheets!` is a meta-skill, you do not run a traditional CLI binary. Instead, you **talk to your AI agent** (Gemini CLI, Claude Code) and ask it to invoke the skill.
 
 ### 1. Interactive Learning Flow
-To teach `oh-sheets!` a new template, simply run:
-```bash
-oh-sheets learn
-```
+To teach `oh-sheets!` a new template, simply tell your agent:
+> "Use the oh-sheets skill to learn a new template"
+*(Or conceptually trigger `oh-sheets learn`)*
+
 The agent will interactively prompt you for:
 1. **Template Name:** (e.g., `ProjectTemplate`)
 2. **Blank Base Template:** The empty target Excel file.
@@ -44,20 +66,14 @@ The Agent will run its internal **RALPH Loop**, identifying spatial anchors, dra
 `schema.json` acts as the contract, defining field types and automatically extracting formula constraints (e.g., protecting `=SUM(A1:A5)`) so the LLM never overwrites calculated cells.
 
 ### 2. Daily Execution
-Once trained, use the unified routing command for your daily tasks:
-```bash
-oh-sheets extract --template 'ProjectTemplate' --input source_file.pdf --output out.xlsx
-```
+Once trained, ask your agent to extract data for your daily tasks:
+> "Use oh-sheets to extract data from source_file.pdf into the ProjectTemplate"
+*(Or conceptually trigger `oh-sheets extract --template 'ProjectTemplate' --input source_file.pdf --output out.xlsx`)*
 
 ### 3. Management
-List all learned templates:
-```bash
-oh-sheets list
-```
-Delete a template:
-```bash
-oh-sheets delete 'ProjectTemplate'
-```
+You can also ask your agent to manage your templates:
+> "List all learned oh-sheets templates"  
+> "Delete the ProjectTemplate from oh-sheets"
 
 ## 🧠 Deep Dive: The Semantic Reference Bank (v2)
 
