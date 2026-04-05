@@ -222,3 +222,57 @@ if __name__ == "__main__":
         payload = json.loads(result.stdout)
         assert payload["status"] == "success"
         assert "signature_mismatch" in payload or payload.get("variant") == "new"
+
+
+def test_degradation_strategy_level2():
+    """Test degradation to Level 2 (LLM + anchors only) when Level 1 fails."""
+    with tempfile.TemporaryDirectory() as workdir:
+        template_dir = Path(workdir)
+        template_path = template_dir / "template.xlsx"
+        schema_path = template_dir / "schema.json"
+        input_path = template_dir / "input.dat"
+        output_path = template_dir / "out.xlsx"
+
+        _write_template(template_path)
+        _write_schema(schema_path)
+        input_path.write_text("test content")
+
+        mock_extractor_path = template_dir / "mock_extractor.py"
+        # Level 1 fails, Level 2 succeeds
+        mock_extractor_content = """import sys, json
+import scripts.orchestration.execution_orchestrator as eo
+import scripts.io.excel_writer
+
+call_count = [0]
+
+def mock_extract(prompt):
+    call_count[0] += 1
+    # First call (Level 1 with rules) fails
+    if call_count[0] == 1:
+        raise Exception("Level 1 failed")
+    # Second call (Level 2 anchors only) succeeds
+    return {"Field_A": "A", "Field_B": "B"}
+
+eo.extract_data = mock_extract
+scripts.io.excel_writer.write_excel = lambda t, d, s, o: open(o, "w").write("dummy excel")
+
+if __name__ == "__main__":
+    class Args:
+        template_dir = sys.argv[1]
+        input = sys.argv[2]
+        output = sys.argv[3]
+    sys.exit(eo.run_orchestrator(Args()))
+"""
+        mock_extractor_path.write_text(mock_extractor_content)
+
+        result = subprocess.run(
+            [sys.executable, str(mock_extractor_path), str(template_dir), str(input_path), str(output_path)],
+            capture_output=True,
+            text=True,
+            env={"PYTHONPATH": ".", **os.environ}
+        )
+
+        payload = json.loads(result.stdout)
+        # Should succeed with degradation
+        assert payload["status"] in ["success", "degraded"]
+        assert payload.get("degraded_level") == 2 or "degraded" in payload.get("message", "")

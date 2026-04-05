@@ -22,6 +22,74 @@ def _read_schema_field_names(schema):
     fields = schema.get("fields", {})
     return [str(name) for name, spec in fields.items() if isinstance(spec, dict)]
 
+def _try_extraction_with_degradation(
+    content: str,
+    schema: dict,
+    rules: list,
+    anchors: dict,
+    patterns: list,
+    matched: list,
+    formulas: list,
+    template_dir: Path
+) -> tuple:
+    """
+    Try extraction with degradation strategy.
+
+    Returns: (extracted_data, degraded_level, error_message)
+    - degraded_level: 1 (full), 2 (anchors only), 3 (deterministic), 4 (failed)
+    """
+    # Level 1: LLM + Reference Bank (full)
+    prompt = build_context_prompt(
+        template_signature=schema.get("meta", {}).get("signature", ""),
+        schema_fields=schema.get("fields", {}),
+        formula_constraints=formulas,
+        anchors=anchors,
+        rules=rules,
+        success_patterns=matched,
+        input_content=content
+    )
+
+    try:
+        extracted = extract_data(prompt)
+        return extracted, 1, None
+    except Exception as e:
+        level1_error = str(e)
+
+    # Level 2: LLM + anchors only (no rules, no success patterns)
+    prompt_level2 = build_context_prompt(
+        template_signature=schema.get("meta", {}).get("signature", ""),
+        schema_fields=schema.get("fields", {}),
+        formula_constraints=formulas,
+        anchors=anchors,
+        rules=[],  # No rules
+        success_patterns=[],  # No patterns
+        input_content=content
+    )
+
+    try:
+        extracted = extract_data(prompt_level2)
+        return extracted, 2, None
+    except Exception as e:
+        level2_error = str(e)
+
+    # Level 3: Deterministic extractor (if exists)
+    extractor_path = template_dir / "extractors" / "main.py"
+    if extractor_path.exists():
+        try:
+            # Import and run deterministic extractor
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("deterministic_extractor", extractor_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            if hasattr(module, 'extract'):
+                extracted = module.extract(content, schema)
+                return extracted, 3, None
+        except Exception as e:
+            level3_error = str(e)
+
+    # Level 4: Failed - user intervention required
+    return None, 4, f"All extraction levels failed. Level 1: {level1_error}, Level 2: {level2_error}"
+
 def run_orchestrator(args):
     template_dir = Path(args.template_dir).expanduser()
     schema_path = template_dir / "schema.json"
@@ -47,25 +115,30 @@ def run_orchestrator(args):
     signature_mismatch = False
     if patterns and not any(p.get("input_signature") == input_sig for p in patterns):
         signature_mismatch = True
-    
-    prompt = build_context_prompt(
-        template_signature=schema.get("meta", {}).get("signature", ""),
-        schema_fields=schema.get("fields", {}),
-        formula_constraints=formulas,
-        anchors=anchors,
+
+    # Try extraction with degradation strategy
+    extracted, degraded_level, error_msg = _try_extraction_with_degradation(
+        content=content,
+        schema=schema,
         rules=rules,
-        success_patterns=matched,
-        input_content=content
+        anchors=anchors,
+        patterns=patterns,
+        matched=matched,
+        formulas=formulas,
+        template_dir=template_dir
     )
-    
-    try:
-        extracted = extract_data(prompt)
-    except Exception as e:
-        error_msg = str(e)
-        print(json.dumps({"status": "failed", "stage": "extractor_output", "error": error_msg}, ensure_ascii=False, indent=2))
+
+    if extracted is None:
+        print(json.dumps({
+            "status": "failed",
+            "stage": "exhausted_degradation",
+            "level": degraded_level,
+            "error": error_msg
+        }, ensure_ascii=False, indent=2))
         log_execution(memory_dir, {
             "status": "failed",
-            "stage": "extractor_output",
+            "stage": "exhausted_degradation",
+            "level": degraded_level,
             "error": error_msg,
             "input_signature": input_sig
         })
@@ -146,6 +219,10 @@ def run_orchestrator(args):
     bank.save_success_patterns(patterns)
 
     result = {"status": "success", "output": str(args.output)}
+    if degraded_level > 1:
+        result["status"] = "degraded"
+        result["degraded_level"] = degraded_level
+        result["message"] = f"Extraction succeeded at degradation level {degraded_level}"
     if signature_mismatch:
         result["signature_mismatch"] = True
         result["message"] = "New variant detected. Pattern added to success_patterns."
