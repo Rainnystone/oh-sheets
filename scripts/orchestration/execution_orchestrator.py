@@ -40,8 +40,13 @@ def run_orchestrator(args):
     anchors = bank.load_anchors()
     patterns = bank.load_success_patterns()
     formulas = extract_formulas_from_schema(schema)
-    
+
     matched = match_patterns(input_sig, patterns)
+
+    # Detect signature mismatch (new variant)
+    signature_mismatch = False
+    if patterns and not any(p.get("input_signature") == input_sig for p in patterns):
+        signature_mismatch = True
     
     prompt = build_context_prompt(
         template_signature=schema.get("meta", {}).get("signature", ""),
@@ -139,8 +144,12 @@ def run_orchestrator(args):
         "data": extracted
     })
     bank.save_success_patterns(patterns)
-        
-    print(json.dumps({"status": "success", "output": str(args.output)}))
+
+    result = {"status": "success", "output": str(args.output)}
+    if signature_mismatch:
+        result["signature_mismatch"] = True
+        result["message"] = "New variant detected. Pattern added to success_patterns."
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 if __name__ == "__main__":

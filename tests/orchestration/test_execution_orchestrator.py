@@ -164,3 +164,61 @@ if __name__ == "__main__":
         # Should NOT exist in cwd/memory
         cwd_memory_path = Path("memory") / "execution_log.jsonl"
         assert not cwd_memory_path.exists(), "Memory should not be written to cwd/memory"
+
+
+def test_signature_mismatch_detection():
+    """Test that new variant (no matching signature) is detected."""
+    with tempfile.TemporaryDirectory() as workdir:
+        template_dir = Path(workdir)
+        template_path = template_dir / "template.xlsx"
+        schema_path = template_dir / "schema.json"
+        input_path = template_dir / "input.dat"
+        output_path = template_dir / "out.xlsx"
+
+        # Create reference_bank with existing patterns
+        bank_dir = template_dir / "reference_bank"
+        bank_dir.mkdir()
+        import json
+        patterns_path = bank_dir / "success_patterns.jsonl"
+        # Existing pattern with different signature
+        patterns_path.write_text(json.dumps({
+            "input_signature": "known_signature_123",
+            "accuracy": 0.95
+        }) + "\n")
+
+        _write_template(template_path)
+        _write_schema(schema_path)
+        # Input content will have a different signature
+        input_path.write_text("completely different content for new signature")
+
+        mock_extractor_path = template_dir / "mock_extractor.py"
+        mock_extractor_content = """import sys, json
+import scripts.orchestration.execution_orchestrator as eo
+import scripts.io.excel_writer
+
+def mock_extract(prompt):
+    return {"Field_A": "A", "Field_B": "B"}
+
+eo.extract_data = mock_extract
+scripts.io.excel_writer.write_excel = lambda t, d, s, o: open(o, "w").write("dummy excel")
+
+if __name__ == "__main__":
+    class Args:
+        template_dir = sys.argv[1]
+        input = sys.argv[2]
+        output = sys.argv[3]
+    sys.exit(eo.run_orchestrator(Args()))
+"""
+        mock_extractor_path.write_text(mock_extractor_content)
+
+        result = subprocess.run(
+            [sys.executable, str(mock_extractor_path), str(template_dir), str(input_path), str(output_path)],
+            capture_output=True,
+            text=True,
+            env={"PYTHONPATH": ".", **os.environ}
+        )
+
+        # Should succeed but indicate signature mismatch (new variant)
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "success"
+        assert "signature_mismatch" in payload or payload.get("variant") == "new"
