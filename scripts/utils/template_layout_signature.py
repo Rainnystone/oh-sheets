@@ -260,3 +260,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def calculate_input_signature(file_path: str) -> str:
+    """Wrapper around core signature calculation for input files."""
+    from scripts.core.signature_matcher import calculate_signature
+    with open(file_path, "r", encoding="utf-8") as f:
+        return calculate_signature(f.read())

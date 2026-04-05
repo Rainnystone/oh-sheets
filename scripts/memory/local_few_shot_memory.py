@@ -198,3 +198,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def record_success_pattern(memory_dir: str, pattern: dict):
+    """Wrapper to interact with Reference Bank success patterns."""
+    from scripts.core.reference_bank import ReferenceBank
+    bank = ReferenceBank(memory_dir)
+    patterns = bank.load_success_patterns()
+    patterns.append(pattern)
+    bank.save_success_patterns(patterns)
