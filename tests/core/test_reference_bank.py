@@ -543,3 +543,19 @@ def test_apply_outcome_success_rewards_all(tmp_path):
     for r in rules:
         assert r["confidence"] == 0.82
         assert r["support"] == 4
+
+
+def test_apply_outcome_failure_penalizes_all(tmp_path):
+    """apply_outcome(Outcome.FAILURE) penalizes every rule: -0.05
+    confidence. Support is unchanged on failure."""
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        {"id": f"R00{i}", "confidence": 0.80, "support": 3}
+        for i in range(1, 6)
+    ])
+    bank.apply_outcome(Outcome.FAILURE)
+    rules = bank.load_rules()
+    assert len(rules) == 5
+    for r in rules:
+        assert r["confidence"] == 0.75
+        assert r["support"] == 3
