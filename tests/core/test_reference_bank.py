@@ -440,3 +440,45 @@ def test_record_success_pattern_appends_not_overwrites(tmp_path):
     # New pattern appended with next ID.
     assert patterns[1]["pattern_id"] == "P002"
     assert patterns[1]["input_signature"] == "new_sig"
+
+
+# ---------------------------------------------------------------------------
+# retrieve_rules signature preference (slice 3)
+# ---------------------------------------------------------------------------
+
+def test_retrieve_rules_signature_preference_exact(tmp_path):
+    """retrieve_rules(input_signature=S) prefers rules that succeeded on
+    a signature-matched input before, tagging them _source="via_signature".
+
+    Scenario: rule R001 is a direct pdf match, AND success pattern P1
+    (sig=S1, rules_used=[R001]) records that R001 succeeded on input
+    with signature S1. Retrieving with input_signature=S1 upgrades R001's
+    _source from "direct" to "via_signature" — a rule that historically
+    succeeded on similar input is a stronger signal than a mere type match.
+
+    Precedence (locked here and in S3-5): via_signature > direct > via_kg.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([_rule("R001", input_type="pdf", confidence=0.7)])
+    bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "S1",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R001"]},
+    ])
+    result = bank.retrieve_rules("pdf", input_signature="S1")
+    sources = {r["id"]: r["_source"] for r in result}
+    assert sources["R001"] == "via_signature"
+
+
+def test_retrieve_rules_no_signature_no_preference(tmp_path):
+    """Without input_signature, signature preference is inactive — rules
+    keep their direct/via_kg sources (slice 1-2 behavior unchanged).
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([_rule("R001", input_type="pdf", confidence=0.7)])
+    bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "S1",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R001"]},
+    ])
+    # No input_signature → R001 stays "direct".
+    result = bank.retrieve_rules("pdf")
+    assert result[0]["_source"] == "direct"

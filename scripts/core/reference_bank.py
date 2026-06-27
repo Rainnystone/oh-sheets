@@ -3,6 +3,14 @@ import re
 import json
 from datetime import datetime
 
+from scripts.core.signature_matcher import match_patterns
+
+# Slice 3: _source precedence for retrieve_rules dedupe. Highest wins when
+# the same rule is reachable via multiple paths. A rule that historically
+# succeeded on a signature-matched input (via_signature) is a stronger
+# signal than a mere type match (direct), which beats a KG neighbor (via_kg).
+_SOURCE_PRECEDENCE = {"via_signature": 3, "direct": 2, "via_kg": 1}
+
 
 class ReferenceBank:
     def __init__(self, base_dir: str):
@@ -105,11 +113,19 @@ class ReferenceBank:
         input_signature=None,
         top_k: int = 10,
     ) -> list:
-        """Filter rules by input_type + trigger, then expand 1 hop via the
-        knowledge graph (slice 2).
+        """Filter rules by input_type + trigger, expand via the knowledge
+        graph (slice 2), then apply signature preference (slice 3).
 
-        Reserved parameters (input_signature) and behaviors (signature
-        preference, lazy decay) land in slices 3-4.
+        Source precedence (highest wins on dedupe):
+            via_signature > direct > via_kg
+
+        - direct: matched the input_type+trigger filter.
+        - via_kg: 1-hop KG neighbor (uses_anchor symmetric, often_follows
+          directional). Slice 2.
+        - via_signature: succeeded on a signature-matched input before
+          (rules_used in a matched success pattern). Slice 3.
+
+        Reserved behaviors (lazy decay, last_used updates) land in slice 4.
         """
         rules = self.load_rules()
         direct = [
@@ -123,27 +139,47 @@ class ReferenceBank:
         # (not in direct_ids) tagged with _source="via_kg".
         via_kg = self._expand_via_kg(direct_ids)
 
-        # Combine direct + via_kg. Sort by confidence desc.
-        combined = direct + via_kg
+        # Slice 3: signature preference. If an input_signature is given,
+        # find success patterns that matched it and collect their
+        # rules_used. Those rules enter the result set (or get upgraded)
+        # with _source="via_signature" — the strongest provenance signal.
+        via_signature: list[dict] = []
+        if input_signature is not None:
+            matched = match_patterns(
+                input_signature, self.load_success_patterns(), top_k=3
+            )
+            preferred_ids: set[str] = set()
+            for p in matched:
+                preferred_ids.update(p.get("rules_used", []))
+            if preferred_ids:
+                via_signature = [
+                    {**r, "_source": "via_signature"}
+                    for r in rules
+                    if r.get("id") in preferred_ids
+                    and r.get("confidence", 0.0) >= 0.3
+                ]
+
+        # Combine all sources. Sort by confidence desc.
+        combined = direct + via_kg + via_signature
         combined.sort(key=lambda r: r.get("confidence", 0.0), reverse=True)
 
-        # Dedupe by rule ID. If a rule is both direct and via_kg, direct
-        # wins — keep _source="direct". Sort already puts the direct copy
-        # first only if its confidence is >= the via_kg copy's, which isn't
-        # guaranteed, so track seen IDs and prefer direct on collision.
+        # Dedupe by rule ID, keeping the highest-precedence _source.
+        # via_signature (3) > direct (2) > via_kg (1). A rule reachable
+        # multiple ways keeps its strongest provenance.
         seen: dict[str, dict] = {}
         for r in combined:
             rid = r.get("id")
+            src = r.get("_source", "direct")
             if rid not in seen:
                 seen[rid] = r
             else:
-                # Collision: prefer direct over via_kg
-                if r.get("_source") == "direct" and seen[rid].get("_source") != "direct":
+                existing_src = seen[rid].get("_source", "direct")
+                if _SOURCE_PRECEDENCE.get(src, 0) > _SOURCE_PRECEDENCE.get(existing_src, 0):
                     seen[rid] = r
         deduped = list(seen.values())
 
         # Tag any untagged (direct) rules with _source="direct". via_kg
-        # rules already carry _source from _expand_via_kg.
+        # and via_signature rules already carry _source from above.
         result = []
         for r in deduped[:top_k]:
             if "_source" not in r:
