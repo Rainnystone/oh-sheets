@@ -289,10 +289,14 @@ class RALPHLoop:
         The penalty runs via the Bank's single outcome writer
         (apply_outcome). New rules are created AFTER the penalty sweep,
         so they're not on disk when it runs and are spared.
-        """
-        if hasattr(self, '_analyze_failure'):
-            return self._analyze_failure(failure_info, existing_rules)
 
+        Codex review (P2): the penalty now runs for BOTH the
+        custom-analyzer path and the default path. Previously the
+        _analyze_failure early return skipped apply_outcome(FAILURE),
+        so existing rules were never penalized on custom-analyzed
+        failures. The custom analyzer now receives the already-penalized
+        rules, and phase5_reflect returns penalized existing + repairs.
+        """
         # Penalize existing rules via the Bank's single outcome writer.
         # apply_outcome reads from disk, so ensure existing rules are
         # persisted first — in production they're already on disk
@@ -302,6 +306,18 @@ class RALPHLoop:
         # collisions (no need to manually reserve pending IDs).
         self.bank.save_rules(existing_rules)
         self.bank.apply_outcome(Outcome.FAILURE)
+        penalized = self.bank.load_rules()
+
+        if hasattr(self, '_analyze_failure'):
+            repairs = self._analyze_failure(failure_info, penalized)
+            # Merge penalized existing rules with the custom repairs,
+            # deduped by ID (a custom analyzer that also returns the
+            # existing rules doesn't double them). Repairs new to the
+            # bank are appended; the penalty on existing rules sticks.
+            penalized_ids = {r.get("id") for r in penalized}
+            return penalized + [
+                r for r in repairs if r.get("id") not in penalized_ids
+            ]
 
         # New repair rules keep creation confidence (0.6) — created
         # after the penalty sweep, so they're not on disk when it runs.

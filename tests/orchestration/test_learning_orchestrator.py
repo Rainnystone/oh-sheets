@@ -177,7 +177,11 @@ def test_ralph_loop_reflect_phase():
         new_rules = ralph.phase5_reflect(failure_info, existing_rules)
 
         assert len(new_rules) >= 1
-        assert new_rules[0]["id"] == "R002"
+        # The custom analyzer's repair rule (R002) is present, alongside
+        # the penalized existing rule (R001) — the penalty now runs even
+        # on the custom-analyzer path (Codex review fix).
+        new_ids = {r["id"] for r in new_rules}
+        assert "R002" in new_ids
 
 
 def test_ralph_loop_full_cycle():
@@ -354,3 +358,41 @@ def test_phase5_reflect_existing_rules_penalized(tmp_path):
     new_ids = [rid for rid in by_id if rid not in {"R001", "R002"}]
     assert len(new_ids) == 1
     assert by_id[new_ids[0]]["confidence"] == 0.6
+
+
+def test_phase5_reflect_custom_analyzer_still_penalizes_existing(tmp_path):
+    """When _analyze_failure is set, the failure penalty must STILL run
+    on existing rules — the custom hook generates repairs, it doesn't
+    opt out of the slice-4 lifecycle policy.
+
+    Codex PR #3 review (P2): the early return for _analyze_failure
+    skipped apply_outcome(Outcome.FAILURE), so existing rules were
+    neither penalized nor archived on failures handled by a custom
+    analyzer. The penalty now runs before the custom analyzer, which
+    receives the already-penalized rules; phase5_reflect returns the
+    penalized existing rules PLUS the custom repairs.
+    """
+    ralph = RALPHLoop(str(tmp_path))
+    ralph.input_type = "pdf"
+    existing = [{"id": "R001", "confidence": 0.9, "support": 5}]
+    received = {}
+
+    def custom_analyzer(failure_info, rules):
+        # Capture what we were handed — should be the penalized rules.
+        received["confidences"] = [r["confidence"] for r in rules]
+        # Return a single repair rule (new, not on disk).
+        return [{"id": "R002", "confidence": 0.6, "support": 0,
+                 "when": {}, "condition": {}, "then": {}}]
+
+    ralph._analyze_failure = custom_analyzer
+    result = ralph.phase5_reflect({"missing_fields": ["x"]}, existing)
+    by_id = {r["id"]: r for r in result}
+
+    # The custom analyzer received already-penalized rules (0.9 → 0.85).
+    assert received["confidences"] == [0.85]
+    # The existing rule is penalized AND still present (not dropped).
+    assert "R001" in by_id
+    assert by_id["R001"]["confidence"] == 0.85
+    # The custom repair is included alongside the penalized existing rule.
+    assert "R002" in by_id
+    assert by_id["R002"]["confidence"] == 0.6
