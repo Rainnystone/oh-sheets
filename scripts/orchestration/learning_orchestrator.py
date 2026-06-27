@@ -222,7 +222,10 @@ class RALPHLoop:
                 schema_fields=schema.get("fields", {}),
                 formula_constraints=schema.get("formula_constraints", []),
                 anchors=self.bank.load_anchors(),
-                rules=self.bank.retrieve_rules(self.input_type),
+                rules=self.bank.retrieve_rules(
+                    self.input_type,
+                    input_signature=schema.get("meta", {}).get("signature"),
+                ),
                 success_patterns=[],
                 input_content=input_content
             )

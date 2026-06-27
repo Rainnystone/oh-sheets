@@ -396,3 +396,45 @@ def test_phase5_reflect_custom_analyzer_still_penalizes_existing(tmp_path):
     # The custom repair is included alongside the penalized existing rule.
     assert "R002" in by_id
     assert by_id["R002"]["confidence"] == 0.6
+
+
+def test_phase3_test_threads_signature_into_retrieval(tmp_path, monkeypatch):
+    """phase3_test passes schema.meta.signature into retrieve_rules so
+    signature preference actually fires during the learning loop.
+
+    Codex PR #3 review (P2): both orchestrators called retrieve_rules
+    without input_signature, so via_signature promotion never happened
+    in production. R001 here has input_type="pdf" — it can NEVER match
+    an "md" query directly. It can only enter the retrieved set via
+    signature preference (a matched pattern names it in rules_used).
+    Observing that R001's last_used was freshened proves the signature
+    was threaded: retrieve_rules only freshens last_used on rules it
+    actually returns.
+    """
+    ralph = RALPHLoop(str(tmp_path))
+    ralph.input_type = "md"
+    # R001 is pdf — invisible to a direct "md" query.
+    ralph.bank.save_rules([{
+        "id": "R001",
+        "when": {"input_type": "pdf", "trigger": "field_extraction"},
+        "condition": {"field": "x"}, "then": {"action": "semantic_extract"},
+        "confidence": 0.8, "support": 0,
+    }])
+    ralph.bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "S1",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R001"]},
+    ])
+    schema = {"meta": {"signature": "S1"},
+              "fields": {"x": {"cell": "A1", "type": "string"}}}
+
+    # Drive phase3_test down its default (prompt-building) path, which
+    # is where retrieve_rules is called. extract_data is mocked.
+    import scripts.extraction.llm_extractor as llm
+    monkeypatch.setattr(llm, "extract_data", lambda prompt: {"x": "v"})
+    ralph._validate = lambda extracted, schema: (True, [])
+
+    ralph.phase3_test("dummy content", schema)
+
+    # R001 was retrieved via signature → its last_used was freshened.
+    on_disk = ralph.bank.load_rules()
+    assert on_disk[0].get("last_used") is not None
