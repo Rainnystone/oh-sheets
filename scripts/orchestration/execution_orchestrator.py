@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import os
+from collections import namedtuple
 from pathlib import Path
 from scripts.core.reference_bank import ReferenceBank
 from scripts.core.prompt_builder import build_context_prompt
@@ -35,6 +36,65 @@ def _fail(memory_dir: Path, input_sig: str, payload: dict) -> int:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     log_execution(memory_dir, {**payload, "input_signature": input_sig})
     return 1
+
+
+# Assembled extraction context returned by _retrieve_context. Named fields
+# (not a positional tuple) so callers and tests read ctx.input_sig etc.
+# without memorising an order.
+_RetrievalContext = namedtuple(
+    "_RetrievalContext",
+    [
+        "rules",
+        "anchors",
+        "patterns",
+        "matched",
+        "input_sig",
+        "input_type",
+        "signature_mismatch",
+    ],
+)
+
+
+def _retrieve_context(bank, content: str, input_path: str) -> "_RetrievalContext":
+    """Build the extraction context from the Reference Bank and the input.
+
+    Single-responsibility step extracted from run_orchestrator (slice 6b,
+    candidate 02 — god-function decomposition). Assembles everything the
+    orchestrator needs before invoking the extractor:
+
+    - input_sig:        MD5 of the input content (used for retrieval,
+                         logging, and success-pattern recording)
+    - input_type:       extension-derived tag threaded into retrieve_rules
+                         and record_success_pattern
+    - rules/anchors/patterns: loaded from the bank
+    - matched:          patterns whose signature matches this input
+                         (exact match preferred, accuracy fallback otherwise)
+    - signature_mismatch: True when stored patterns exist but none share
+                         this input's signature — i.e. a new variant
+
+    Accepts the bank as a dependency rather than constructing one, so a
+    unit test can pass a duck-typed stub instead of standing up a real
+    ReferenceBank on disk. Formula extraction stays in the orchestrator:
+    it derives from the schema, not the bank, so it does not belong here.
+    """
+    input_sig = calculate_signature(content)
+    input_type = _determine_input_type(input_path)
+    rules = bank.retrieve_rules(input_type, input_signature=input_sig)
+    anchors = bank.load_anchors()
+    patterns = bank.load_success_patterns()
+    matched = match_patterns(input_sig, patterns)
+    signature_mismatch = bool(
+        patterns and not any(p.get("input_signature") == input_sig for p in patterns)
+    )
+    return _RetrievalContext(
+        rules=rules,
+        anchors=anchors,
+        patterns=patterns,
+        matched=matched,
+        input_sig=input_sig,
+        input_type=input_type,
+        signature_mismatch=signature_mismatch,
+    )
 
 def _try_extraction_with_degradation(
     content: str,
@@ -115,21 +175,16 @@ def run_orchestrator(args):
     with open(args.input, "r", encoding="utf-8") as f:
         content = f.read()
         
-    input_sig = calculate_signature(content)
     bank = ReferenceBank(str(template_dir / "reference_bank"))
-
-    input_type = _determine_input_type(args.input)
-    rules = bank.retrieve_rules(input_type, input_signature=input_sig)
-    anchors = bank.load_anchors()
-    patterns = bank.load_success_patterns()
+    ctx = _retrieve_context(bank, content, args.input)
+    rules = ctx.rules
+    anchors = ctx.anchors
+    patterns = ctx.patterns
+    matched = ctx.matched
+    input_sig = ctx.input_sig
+    input_type = ctx.input_type
+    signature_mismatch = ctx.signature_mismatch
     formulas = extract_formulas_from_schema(schema)
-
-    matched = match_patterns(input_sig, patterns)
-
-    # Detect signature mismatch (new variant)
-    signature_mismatch = False
-    if patterns and not any(p.get("input_signature") == input_sig for p in patterns):
-        signature_mismatch = True
 
     # Try extraction with degradation strategy
     extracted, degraded_level, error_msg = _try_extraction_with_degradation(

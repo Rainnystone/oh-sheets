@@ -512,3 +512,93 @@ if __name__ == "__main__":
             f"degraded extraction recorded rules_used="
             f"{patterns[0].get('rules_used')!r} — should be empty"
         )
+
+
+class _StubBank:
+    """Duck-typed stand-in for ReferenceBank.
+
+    _retrieve_context accepts the bank as a dependency (instead of
+    constructing one internally), so a unit test can pass this stub and
+    observe exactly which methods were called with which arguments —
+    no on-disk ReferenceBank required.
+    """
+    def __init__(self, rules=None, anchors=None, patterns=None):
+        self._rules = rules if rules is not None else []
+        self._anchors = anchors if anchors is not None else {}
+        self._patterns = patterns if patterns is not None else []
+        self.received_input_type = None
+        self.received_input_signature = None
+
+    def retrieve_rules(self, input_type, input_signature=None):
+        self.received_input_type = input_type
+        self.received_input_signature = input_signature
+        return self._rules
+
+    def load_anchors(self):
+        return self._anchors
+
+    def load_success_patterns(self):
+        return self._patterns
+
+
+def test_retrieve_context_assembles_context_when_signature_known():
+    """_retrieve_context builds the full extraction context — signature,
+    input_type, rules, anchors, patterns, matched, signature_mismatch —
+    behind one call, threading (input_type, input_signature) into
+    retrieve_rules.
+
+    Slice 6b (god-function decomposition, candidate 02). With a known
+    signature stored in the bank, the input is NOT a new variant.
+    """
+    import hashlib
+    from scripts.orchestration.execution_orchestrator import _retrieve_context
+
+    content = "hello world"
+    input_sig = hashlib.md5(content.encode("utf-8")).hexdigest()
+    rules = [{"id": "R001"}]
+    anchors = {"anchor_a": {"row": 2}}
+    patterns = [{"input_signature": input_sig, "accuracy": 1.0}]
+
+    bank = _StubBank(rules=rules, anchors=anchors, patterns=patterns)
+    ctx = _retrieve_context(bank, content, "sample.pdf")
+
+    assert ctx.input_sig == input_sig
+    assert ctx.input_type == "pdf"
+    assert ctx.rules == rules
+    assert ctx.anchors == anchors
+    assert ctx.patterns == patterns
+    # exact signature match -> the stored pattern is returned by match_patterns
+    assert ctx.matched == patterns
+    assert ctx.signature_mismatch is False
+    # the bank was queried with the right (input_type, input_signature)
+    assert bank.received_input_type == "pdf"
+    assert bank.received_input_signature == input_sig
+
+
+def test_retrieve_context_flags_new_variant_when_signature_unseen():
+    """When stored patterns exist but none match the input signature,
+    signature_mismatch is True (new variant detected)."""
+    from scripts.orchestration.execution_orchestrator import _retrieve_context
+
+    patterns = [{"input_signature": "some_other_signature", "accuracy": 0.9}]
+    bank = _StubBank(patterns=patterns)
+
+    ctx = _retrieve_context(bank, "a brand new variant", "sample.md")
+
+    assert ctx.input_type == "md"
+    assert ctx.signature_mismatch is True
+    # no exact match -> match_patterns falls back to accuracy >= threshold
+    assert ctx.matched == patterns
+
+
+def test_retrieve_context_no_mismatch_when_no_patterns_stored():
+    """With no stored patterns there is nothing to compare against, so
+    signature_mismatch stays False (the `patterns and ...` guard)."""
+    from scripts.orchestration.execution_orchestrator import _retrieve_context
+
+    bank = _StubBank(patterns=[])
+    ctx = _retrieve_context(bank, "fresh start, no history", "sample.txt")
+
+    assert ctx.signature_mismatch is False
+    assert ctx.matched == []
+    assert ctx.input_type == "md"
