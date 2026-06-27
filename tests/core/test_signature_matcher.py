@@ -13,8 +13,13 @@ def test_match_patterns():
     assert len(matches) == 1
     assert matches[0]["accuracy"] == 1.0
 
-def test_match_patterns_no_exact_match_returns_similar():
-    """When no exact signature match, return similar patterns by metadata."""
+def test_match_patterns_no_exact_match_returns_by_accuracy_fallback():
+    """When no exact signature match, fall back to accuracy-based selection.
+
+    Note: this fallback does NOT compare signatures — it returns
+    historically-accurate patterns regardless of their signature. True
+    signature similarity would need embeddings and is out of scope.
+    """
     patterns = [
         {"input_signature": "abc123", "accuracy": 0.95, "input_type": "pdf"},
         {"input_signature": "def456", "accuracy": 0.85, "input_type": "pdf"},

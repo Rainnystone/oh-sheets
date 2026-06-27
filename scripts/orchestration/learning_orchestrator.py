@@ -14,10 +14,9 @@ import json
 import sys
 import os
 from pathlib import Path
-from datetime import datetime
 
 from scripts.core.reference_bank import ReferenceBank
-from scripts.core.rule_evolution import update_rule_confidence
+from scripts.core.rule_evolution import Outcome
 from scripts.core.signature_matcher import calculate_signature
 from scripts.core.input_type import determine_input_type as _determine_input_type
 
@@ -34,6 +33,12 @@ class RALPHLoop:
         # that create rules (phase2_draft, phase5_reflect) and phases that
         # retrieve them (phase3_test). Defaults to "md" for direct callers.
         self.input_type = "md"
+        # Rule IDs phase3_test retrieved on its most recent call. phase4_commit
+        # reads this so the success pattern's rules_used records which rules
+        # actually reached the prompt (Codex PR #3 review P2). Reset at the
+        # start of every phase3_test; empty when the custom _execute_extraction
+        # path is used (it bypasses the bank).
+        self._last_retrieved_rule_ids: list = []
 
     def run_full_cycle(self, sample_input: str, target_excel: str, max_retries: int = 5) -> dict:
         """
@@ -211,6 +216,9 @@ class RALPHLoop:
 
         Returns: (success: bool, result: dict)
         """
+        # Reset the retrieved-rule stash for this attempt. phase4_commit
+        # (only called on success, immediately after this) reads it.
+        self._last_retrieved_rule_ids = []
         if hasattr(self, '_execute_extraction'):
             extracted = self._execute_extraction(input_content)
         else:
@@ -218,12 +226,18 @@ class RALPHLoop:
             from scripts.extraction.llm_extractor import extract_data
             from scripts.core.prompt_builder import build_context_prompt
 
+            retrieved = self.bank.retrieve_rules(
+                self.input_type,
+                input_signature=schema.get("meta", {}).get("signature"),
+            )
+            # Stash the IDs phase4_commit will record in rules_used.
+            self._last_retrieved_rule_ids = [r.get("id") for r in retrieved]
             prompt = build_context_prompt(
                 template_signature=schema.get("meta", {}).get("signature", ""),
                 schema_fields=schema.get("fields", {}),
                 formula_constraints=schema.get("formula_constraints", []),
                 anchors=self.bank.load_anchors(),
-                rules=self.bank.retrieve_rules(self.input_type),
+                rules=retrieved,
                 success_patterns=[],
                 input_content=input_content
             )
@@ -253,24 +267,24 @@ class RALPHLoop:
         """
         input_sig = calculate_signature(input_content)
 
-        # Record success pattern
-        patterns = self.bank.load_success_patterns()
-        patterns.append({
-            "input_signature": input_sig,
-            "accuracy": 1.0,
-            "data": extracted,
-            "created_at": datetime.now().isoformat()
-        })
-        self.bank.save_success_patterns(patterns)
+        # Slice 3: single writer. phase4_commit records the rule IDs phase3_test
+        # retrieved (stashed on self) into rules_used, so future signature-
+        # preference lookups can associate this input with the rules that
+        # reached the prompt. anchors_matched stays empty here — anchor
+        # matching happens in the extractor, not the orchestrator.
+        self.bank.record_success_pattern(
+            input_signature=input_sig,
+            input_type=self.input_type,
+            extracted=extracted,
+            rules_used=list(self._last_retrieved_rule_ids),
+            anchors_matched=[],
+            accuracy=1.0,
+        )
 
-        # Update rule confidence
-        rules = self.bank.load_rules()
-        updated_rules = []
-        for r in rules:
-            ur = update_rule_confidence(r, 1.0)
-            if ur is not None:
-                updated_rules.append(ur)
-        self.bank.save_rules(updated_rules)
+        # Slice 4: single outcome writer. apply_outcome(SUCCESS) rewards
+        # all rules (+0.02 confidence, +1 support) and persists. Replaces
+        # the inline confidence-update loop.
+        self.bank.apply_outcome(Outcome.SUCCESS)
 
         return {"status": "committed", "signature": input_sig}
 
@@ -279,30 +293,59 @@ class RALPHLoop:
         Phase 5: REFLECT
 
         Analyze failure and generate/update rules.
+
+        Slice 4: new repair rules keep their creation confidence (0.6) —
+        they're not penalized for the failure they were created to fix.
+        Only rules that existed before this reflection receive the
+        failure penalty. A rule just invented to repair a missing field
+        hasn't been tested yet, so penalizing it would snuff it out
+        before it ever got a fair trial.
+
+        The penalty runs via the Bank's single outcome writer
+        (apply_outcome). New rules are created AFTER the penalty sweep,
+        so they're not on disk when it runs and are spared.
+
+        Codex review (P2): the penalty now runs for BOTH the
+        custom-analyzer path and the default path. Previously the
+        _analyze_failure early return skipped apply_outcome(FAILURE),
+        so existing rules were never penalized on custom-analyzed
+        failures. The custom analyzer now receives the already-penalized
+        rules, and phase5_reflect returns penalized existing + repairs.
         """
+        # Penalize existing rules via the Bank's single outcome writer.
+        # apply_outcome reads from disk, so ensure existing rules are
+        # persisted first — in production they're already on disk
+        # (existing_rules == bank.load_rules()), but phase5_reflect must
+        # also work for direct callers passing rules not yet saved.
+        # Saving first also lets add_rule see the existing IDs and avoid
+        # collisions (no need to manually reserve pending IDs).
+        self.bank.save_rules(existing_rules)
+        self.bank.apply_outcome(Outcome.FAILURE)
+        penalized = self.bank.load_rules()
+
         if hasattr(self, '_analyze_failure'):
-            new_rules = self._analyze_failure(failure_info, existing_rules)
-        else:
-            # Default: create rules for missing fields. Use bank.add_rule()
-            # for unique IDs (max+1, not len+1) and real input_type tagging.
-            new_rules = list(existing_rules)
-            for field in failure_info.get("missing_fields", []):
-                new_rules.append(self.bank.add_rule(
-                    input_type=self.input_type,
-                    trigger="field_extraction",
-                    field=field,
-                    action="retry_extract",
-                    confidence=0.6,
-                ))
+            repairs = self._analyze_failure(failure_info, penalized)
+            # Merge penalized existing rules with the custom repairs,
+            # deduped by ID (a custom analyzer that also returns the
+            # existing rules doesn't double them). Repairs new to the
+            # bank are appended; the penalty on existing rules sticks.
+            penalized_ids = {r.get("id") for r in penalized}
+            return penalized + [
+                r for r in repairs if r.get("id") not in penalized_ids
+            ]
 
-        # Update confidence of existing rules (failure signal)
-        updated_rules = []
-        for r in new_rules:
-            ur = update_rule_confidence(r, 0.2)  # Low outcome = confidence decrease
-            if ur is not None:
-                updated_rules.append(ur)
-
-        return updated_rules
+        # New repair rules keep creation confidence (0.6) — created
+        # after the penalty sweep, so they're not on disk when it runs.
+        new_rules = []
+        for field in failure_info.get("missing_fields", []):
+            new_rules.append(self.bank.add_rule(
+                input_type=self.input_type,
+                trigger="field_extraction",
+                field=field,
+                action="retry_extract",
+                confidence=0.6,
+            ))
+        return self.bank.load_rules() + new_rules
 
 
 def run_learning(args):

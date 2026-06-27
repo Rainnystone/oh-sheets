@@ -11,7 +11,7 @@ from scripts.core.input_type import determine_input_type as _determine_input_typ
 from scripts.extraction.formula_analyzer import extract_formulas_from_schema, analyze_workbook_formulas
 from scripts.extraction.llm_extractor import extract_data
 from scripts.io.excel_writer import write_excel
-from scripts.core.rule_evolution import update_rule_confidence
+from scripts.core.rule_evolution import Outcome
 
 
 def log_execution(memory_dir: Path, record: dict):
@@ -107,7 +107,7 @@ def run_orchestrator(args):
     bank = ReferenceBank(str(template_dir / "reference_bank"))
 
     input_type = _determine_input_type(args.input)
-    rules = bank.retrieve_rules(input_type)
+    rules = bank.retrieve_rules(input_type, input_signature=input_sig)
     anchors = bank.load_anchors()
     patterns = bank.load_success_patterns()
     formulas = extract_formulas_from_schema(schema)
@@ -227,28 +227,33 @@ def run_orchestrator(args):
         "output": str(args.output)
     })
 
-    # Reward retrieved rules with success outcome, then save the FULL bank.
-    # Don't overwrite with `updated_rules` (the retrieved subset) — that
-    # would delete every non-retrieved rule and persist the in-memory
-    # _source tag. Merge confidences into load_rules() before saving.
-    retrieved_ids = {r.get("id") for r in rules}
-    all_rules = bank.load_rules()
-    for r in all_rules:
-        if r.get("id") in retrieved_ids:
-            ur = update_rule_confidence(r, 1.0)
-            if ur is not None:
-                # Preserve non-confidence fields from the on-disk rule
-                # (don't leak _source into the persisted dict).
-                r["confidence"] = ur["confidence"]
-                r["support"] = ur.get("support", r.get("support", 0))
-    bank.save_rules(all_rules)
+    # Slice 4: single outcome writer. apply_outcome(SUCCESS) rewards all
+    # rules (+0.02 confidence, +1 support) and persists. Replaces the
+    # inline selective-reward loop. Loading from disk inside apply_outcome
+    # means _source never leaks into rules.jsonl.
+    bank.apply_outcome(Outcome.SUCCESS)
 
-    patterns.append({
-        "input_signature": input_sig,
-        "accuracy": 1.0,
-        "data": extracted
-    })
-    bank.save_success_patterns(patterns)
+    # Slice 3: single writer. record_success_pattern populates the full
+    # §3.4 schema (pattern_id, input_type, fields_extracted, rules_used,
+    # anchors_matched, ...). rules_used is the retrieved set (an
+    # over-approximation — we don't instrument which rules the LLM
+    # actually used); anchors_matched is the loaded anchor keys.
+    #
+    # Codex PR #3 review (P2): when degradation dropped to Level 2+ the
+    # rules were never sent to the LLM (Level 2 builds its prompt with
+    # rules=[]; Level 3 is a deterministic extractor with no LLM at all).
+    # Recording them in rules_used would corrupt signature preference —
+    # a future input matching this signature would be told these rules
+    # worked when they were never in the prompt. Omit them when degraded.
+    rules_used = [] if degraded_level > 1 else [r["id"] for r in rules]
+    bank.record_success_pattern(
+        input_signature=input_sig,
+        input_type=input_type,
+        extracted=extracted,
+        rules_used=rules_used,
+        anchors_matched=list(anchors.keys()) if isinstance(anchors, dict) else [],
+        accuracy=1.0,
+    )
 
     result = {"status": "success", "output": str(args.output)}
     if formula_conflicts:

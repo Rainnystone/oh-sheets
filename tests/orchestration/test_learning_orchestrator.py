@@ -177,7 +177,11 @@ def test_ralph_loop_reflect_phase():
         new_rules = ralph.phase5_reflect(failure_info, existing_rules)
 
         assert len(new_rules) >= 1
-        assert new_rules[0]["id"] == "R002"
+        # The custom analyzer's repair rule (R002) is present, alongside
+        # the penalized existing rule (R001) — the penalty now runs even
+        # on the custom-analyzer path (Codex review fix).
+        new_ids = {r["id"] for r in new_rules}
+        assert "R002" in new_ids
 
 
 def test_ralph_loop_full_cycle():
@@ -302,3 +306,173 @@ def test_phase2_draft_edge_creation_idempotent(tmp_path):
 
     # Edge count is still 1 — idempotent.
     assert _count_edges(rule_id, "A1") == 1
+
+
+# ---------------------------------------------------------------------------
+# phase5_reflect: new rules keep creation confidence (slice 4 bugfix)
+# ---------------------------------------------------------------------------
+
+def test_phase5_reflect_new_rules_keep_creation_confidence(tmp_path):
+    """phase5_reflect creates new repair rules at 0.6 for each missing
+    field. Those NEW rules must keep 0.6 — they must NOT receive the
+    failure penalty applied to existing rules.
+
+    Bug: the old code ran update_rule_confidence(r, 0.2) over ALL rules
+    in new_rules (existing + newly created), so a brand-new rule created
+    at 0.6 was immediately penalized to 0.55. A rule just invented to
+    fix a failure hasn't been tested yet — it shouldn't be punished for
+    that same failure.
+    """
+    ralph = RALPHLoop(str(tmp_path))
+    ralph.input_type = "pdf"
+    failure_info = {"missing_fields": ["Vendor_Name"], "error": "incomplete"}
+    result = ralph.phase5_reflect(failure_info, existing_rules=[])
+    # One new rule created for the missing field.
+    assert len(result) == 1
+    # The new rule keeps its creation confidence (0.6), not penalized to 0.55.
+    assert result[0]["confidence"] == 0.6
+
+
+def test_phase5_reflect_existing_rules_penalized(tmp_path):
+    """Complement to the new-rules-keep-0.6 test: rules that EXISTED
+    before the reflection still receive the failure penalty (-0.05).
+
+    Together the two tests pin down the distinction: existing rules are
+    penalized for the failure; new repair rules are not. A fix that
+    skipped penalizing entirely would pass S4-10 but fail here.
+    """
+    ralph = RALPHLoop(str(tmp_path))
+    ralph.input_type = "pdf"
+    existing = [
+        {"id": "R001", "confidence": 0.9, "support": 5},
+        {"id": "R002", "confidence": 0.8, "support": 3},
+    ]
+    failure_info = {"missing_fields": ["Vendor_Name"], "error": "incomplete"}
+    result = ralph.phase5_reflect(failure_info, existing_rules=existing)
+
+    by_id = {r["id"]: r for r in result}
+    # Existing rules penalized: 0.9 → 0.85, 0.8 → 0.75.
+    assert by_id["R001"]["confidence"] == 0.85
+    assert by_id["R002"]["confidence"] == 0.75
+    # New repair rule created at 0.6, unpenalized.
+    new_ids = [rid for rid in by_id if rid not in {"R001", "R002"}]
+    assert len(new_ids) == 1
+    assert by_id[new_ids[0]]["confidence"] == 0.6
+
+
+def test_phase5_reflect_custom_analyzer_still_penalizes_existing(tmp_path):
+    """When _analyze_failure is set, the failure penalty must STILL run
+    on existing rules — the custom hook generates repairs, it doesn't
+    opt out of the slice-4 lifecycle policy.
+
+    Codex PR #3 review (P2): the early return for _analyze_failure
+    skipped apply_outcome(Outcome.FAILURE), so existing rules were
+    neither penalized nor archived on failures handled by a custom
+    analyzer. The penalty now runs before the custom analyzer, which
+    receives the already-penalized rules; phase5_reflect returns the
+    penalized existing rules PLUS the custom repairs.
+    """
+    ralph = RALPHLoop(str(tmp_path))
+    ralph.input_type = "pdf"
+    existing = [{"id": "R001", "confidence": 0.9, "support": 5}]
+    received = {}
+
+    def custom_analyzer(failure_info, rules):
+        # Capture what we were handed — should be the penalized rules.
+        received["confidences"] = [r["confidence"] for r in rules]
+        # Return a single repair rule (new, not on disk).
+        return [{"id": "R002", "confidence": 0.6, "support": 0,
+                 "when": {}, "condition": {}, "then": {}}]
+
+    ralph._analyze_failure = custom_analyzer
+    result = ralph.phase5_reflect({"missing_fields": ["x"]}, existing)
+    by_id = {r["id"]: r for r in result}
+
+    # The custom analyzer received already-penalized rules (0.9 → 0.85).
+    assert received["confidences"] == [0.85]
+    # The existing rule is penalized AND still present (not dropped).
+    assert "R001" in by_id
+    assert by_id["R001"]["confidence"] == 0.85
+    # The custom repair is included alongside the penalized existing rule.
+    assert "R002" in by_id
+    assert by_id["R002"]["confidence"] == 0.6
+
+
+def test_phase3_test_threads_signature_into_retrieval(tmp_path, monkeypatch):
+    """phase3_test passes schema.meta.signature into retrieve_rules so
+    signature preference actually fires during the learning loop.
+
+    Codex PR #3 review (P2): both orchestrators called retrieve_rules
+    without input_signature, so via_signature promotion never happened
+    in production. R001 here has input_type="pdf" — it can NEVER match
+    an "md" query directly. It can only enter the retrieved set via
+    signature preference (a matched pattern names it in rules_used).
+    Observing that R001's last_used was freshened proves the signature
+    was threaded: retrieve_rules only freshens last_used on rules it
+    actually returns.
+    """
+    ralph = RALPHLoop(str(tmp_path))
+    ralph.input_type = "md"
+    # R001 is pdf — invisible to a direct "md" query.
+    ralph.bank.save_rules([{
+        "id": "R001",
+        "when": {"input_type": "pdf", "trigger": "field_extraction"},
+        "condition": {"field": "x"}, "then": {"action": "semantic_extract"},
+        "confidence": 0.8, "support": 0,
+    }])
+    ralph.bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "S1",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R001"]},
+    ])
+    schema = {"meta": {"signature": "S1"},
+              "fields": {"x": {"cell": "A1", "type": "string"}}}
+
+    # Drive phase3_test down its default (prompt-building) path, which
+    # is where retrieve_rules is called. extract_data is mocked.
+    import scripts.extraction.llm_extractor as llm
+    monkeypatch.setattr(llm, "extract_data", lambda prompt: {"x": "v"})
+    ralph._validate = lambda extracted, schema: (True, [])
+
+    ralph.phase3_test("dummy content", schema)
+
+    # R001 was retrieved via signature → its last_used was freshened.
+    on_disk = ralph.bank.load_rules()
+    assert on_disk[0].get("last_used") is not None
+
+
+def test_phase4_commit_records_retrieved_rule_ids_in_success_pattern(tmp_path, monkeypatch):
+    """phase4_commit records the rule IDs phase3_test retrieved into the
+    success pattern's rules_used.
+
+    Codex PR #3 review (P2): phase4_commit recorded rules_used=[] because
+    phase3_test consumed the retrieved rules internally and never handed
+    them back. With rules_used always empty, signature preference (slice
+    3) could never accumulate rule associations in the learning loop —
+    the via_signature path was dead in self-learning.
+
+    R001 is a direct match for input_type="md". phase3_test retrieves it
+    (and stashes the IDs); phase4_commit then writes a success pattern
+    whose rules_used names R001.
+    """
+    ralph = RALPHLoop(str(tmp_path))
+    ralph.input_type = "md"
+    ralph.bank.save_rules([{
+        "id": "R001",
+        "when": {"input_type": "md", "trigger": "field_extraction"},
+        "condition": {"field": "x"}, "then": {"action": "semantic_extract"},
+        "confidence": 0.8, "support": 0,
+    }])
+    schema = {"meta": {"signature": "S1"},
+              "fields": {"x": {"cell": "A1", "type": "string"}}}
+
+    import scripts.extraction.llm_extractor as llm
+    monkeypatch.setattr(llm, "extract_data", lambda prompt: {"x": "v"})
+    ralph._validate = lambda extracted, schema: (True, [])
+
+    success, extracted = ralph.phase3_test("dummy content", schema)
+    assert success
+    ralph.phase4_commit("dummy content", extracted)
+
+    patterns = ralph.bank.load_success_patterns()
+    assert len(patterns) == 1
+    assert "R001" in patterns[0].get("rules_used", [])

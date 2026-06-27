@@ -1,6 +1,9 @@
 import os
+import re
 import json
+from datetime import datetime, timedelta
 from scripts.core.reference_bank import ReferenceBank
+from scripts.core.rule_evolution import Outcome
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +326,40 @@ def test_add_rule_unique_ids_within_unsaved_batch(tmp_path):
     assert next_rule["id"] == "R004"
 
 
+def test_next_rule_id_never_reuses_archived_id_referenced_by_pattern(tmp_path):
+    """A rule ID is never reused, even after the rule is archived, if a
+    success pattern (or KG edge) still references it.
+
+    P1 regression: phase5_reflect archives an existing rule via
+    apply_outcome(FAILURE), then add_rule() computes the next ID from
+    the post-archive bank. If the archived rule had the highest ID
+    (e.g. R005), _next_rule_id would reissue R005 for the new repair
+    rule — and a success pattern whose rules_used still names the old
+    R005 would resolve to the unrelated new rule, corrupting signature
+    retrieval. IDs must be monotonic across everything the Bank stores.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        _rule("R001", input_type="pdf", confidence=0.80),
+        _rule("R005", input_type="pdf", confidence=0.32),  # will be archived
+    ])
+    # A historical success pattern still names R005 in rules_used.
+    bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "S1",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R005"]},
+    ])
+    # Archive R005: 0.32 → 0.27, below threshold.
+    bank.apply_outcome(Outcome.FAILURE)
+    assert [r["id"] for r in bank.load_rules()] == ["R001"]
+
+    # The next rule must be R006 (max-ever-issued + 1), NOT R005 reused.
+    new_rule = bank.add_rule(
+        input_type="pdf", trigger="field_extraction",
+        field="vendor", action="retry_extract",
+    )
+    assert new_rule["id"] == "R006"
+
+
 def test_reference_bank_crud(tmp_path):
     bank_dir = tmp_path / "reference_bank"
     bank = ReferenceBank(str(bank_dir))
@@ -342,3 +379,402 @@ def test_reference_bank_crud(tmp_path):
     # Test Knowledge Graph
     bank.save_knowledge_graph({"edges": [{"from": "R001", "to": "R002"}]})
     assert bank.load_knowledge_graph()["edges"][0]["from"] == "R001"
+
+
+# ---------------------------------------------------------------------------
+# record_success_pattern (slice 3)
+# ---------------------------------------------------------------------------
+
+def test_record_success_pattern_populates_full_schema(tmp_path):
+    """record_success_pattern is the single writer for success patterns.
+
+    It must populate the full spec §3.4 schema: pattern_id, input_signature,
+    input_type, fields_extracted, accuracy, rules_used, anchors_matched,
+    created_at. Before this slice, two inline writers wrote different
+    partial schemas and a third dead writer existed.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.record_success_pattern(
+        input_signature="sig_abc",
+        input_type="pdf",
+        extracted={"vendor_name": "ABC Corp", "amount": "1000"},
+        rules_used=["R001", "R002"],
+        anchors_matched=["A1"],
+        accuracy=1.0,
+    )
+    patterns = bank.load_success_patterns()
+    assert len(patterns) == 1
+    p = patterns[0]
+    # Full §3.4 schema — all eight fields present.
+    assert set(p.keys()) >= {
+        "pattern_id", "input_signature", "input_type", "fields_extracted",
+        "accuracy", "rules_used", "anchors_matched", "created_at",
+    }
+    assert p["input_signature"] == "sig_abc"
+    assert p["input_type"] == "pdf"
+    assert p["fields_extracted"] == ["vendor_name", "amount"]
+    assert p["accuracy"] == 1.0
+    assert p["rules_used"] == ["R001", "R002"]
+    assert p["anchors_matched"] == ["A1"]
+    assert p["pattern_id"].startswith("P")
+    # created_at is an ISO timestamp (parseable).
+    datetime.fromisoformat(p["created_at"])
+
+
+def test_record_success_pattern_generates_sequential_ids(tmp_path):
+    """pattern_id is max(existing)+1, not len(existing)+1.
+
+    Same convention as add_rule's R00x IDs. Two successive calls produce
+    P001 then P002; if a P005 already exists on disk, the next is P006
+    (not P002).
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.record_success_pattern(
+        input_signature="s1", input_type="pdf", extracted={"a": "1"},
+        rules_used=[], anchors_matched=[],
+    )
+    bank.record_success_pattern(
+        input_signature="s2", input_type="pdf", extracted={"b": "2"},
+        rules_used=[], anchors_matched=[],
+    )
+    ids = [p["pattern_id"] for p in bank.load_success_patterns()]
+    assert ids == ["P001", "P002"]
+
+    # Pre-existing P005 on disk → next is P006 (max+1, not len+1=3).
+    bank2 = ReferenceBank(str(tmp_path / "bank2"))
+    bank2.save_success_patterns([{"pattern_id": "P005", "accuracy": 1.0}])
+    bank2.record_success_pattern(
+        input_signature="s3", input_type="pdf", extracted={"c": "3"},
+        rules_used=[], anchors_matched=[],
+    )
+    assert bank2.load_success_patterns()[-1]["pattern_id"] == "P006"
+
+
+def test_record_success_pattern_appends_not_overwrites(tmp_path):
+    """record_success_pattern appends; existing patterns survive.
+
+    Critical for the success-history invariant: the bank accumulates
+    patterns over time. The old inline writers called save_success_patterns
+    with a freshly-built list, which was correct only because they loaded
+    first — but the contract must be explicit: never overwrite.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "old_sig",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R001"]},
+    ])
+    bank.record_success_pattern(
+        input_signature="new_sig", input_type="excel",
+        extracted={"x": "1"}, rules_used=["R002"], anchors_matched=[],
+    )
+    patterns = bank.load_success_patterns()
+    assert len(patterns) == 2
+    # Old pattern preserved unchanged.
+    assert patterns[0]["pattern_id"] == "P001"
+    assert patterns[0]["input_signature"] == "old_sig"
+    # New pattern appended with next ID.
+    assert patterns[1]["pattern_id"] == "P002"
+    assert patterns[1]["input_signature"] == "new_sig"
+
+
+# ---------------------------------------------------------------------------
+# retrieve_rules signature preference (slice 3)
+# ---------------------------------------------------------------------------
+
+def test_retrieve_rules_signature_preference_exact(tmp_path):
+    """retrieve_rules(input_signature=S) prefers rules that succeeded on
+    a signature-matched input before, tagging them _source="via_signature".
+
+    Scenario: rule R001 is a direct pdf match, AND success pattern P1
+    (sig=S1, rules_used=[R001]) records that R001 succeeded on input
+    with signature S1. Retrieving with input_signature=S1 upgrades R001's
+    _source from "direct" to "via_signature" — a rule that historically
+    succeeded on similar input is a stronger signal than a mere type match.
+
+    Precedence (locked here and in S3-5): via_signature > direct > via_kg.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([_rule("R001", input_type="pdf", confidence=0.7)])
+    bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "S1",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R001"]},
+    ])
+    result = bank.retrieve_rules("pdf", input_signature="S1")
+    sources = {r["id"]: r["_source"] for r in result}
+    assert sources["R001"] == "via_signature"
+
+
+def test_retrieve_rules_no_signature_no_preference(tmp_path):
+    """Without input_signature, signature preference is inactive — rules
+    keep their direct/via_kg sources (slice 1-2 behavior unchanged).
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([_rule("R001", input_type="pdf", confidence=0.7)])
+    bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "S1",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R001"]},
+    ])
+    # No input_signature → R001 stays "direct".
+    result = bank.retrieve_rules("pdf")
+    assert result[0]["_source"] == "direct"
+
+
+def test_retrieve_rules_via_signature_overrides_via_kg(tmp_path):
+    """A rule reachable both via_kg AND via_signature keeps via_signature.
+
+    R001 (pdf) is direct. R002 (excel) shares anchor A1 with R001, so
+    without signature preference R002 would be via_kg. But R002 is also
+    in a success pattern's rules_used for signature S1 — so when
+    retrieving with input_signature=S1, R002's provenance upgrades from
+    via_kg to via_signature (the stronger signal wins).
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        _rule("R001", input_type="pdf", confidence=0.9),
+        _rule("R002", input_type="excel", confidence=0.7),
+    ])
+    # R002 is a 1-hop KG neighbor of R001 (shared anchor A1).
+    bank.save_knowledge_graph({"schema_version": "1.0", "edges": [
+        _edge("R001", "A1", "uses_anchor"),
+        _edge("R002", "A1", "uses_anchor"),
+    ]})
+    # R002 also succeeded on signature S1 before.
+    bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "S1",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R002"]},
+    ])
+
+    # Without signature: R002 is via_kg.
+    result_no_sig = bank.retrieve_rules("pdf")
+    sources_no_sig = {r["id"]: r["_source"] for r in result_no_sig}
+    assert sources_no_sig["R002"] == "via_kg"
+
+    # With signature S1: R002 upgrades to via_signature.
+    result_sig = bank.retrieve_rules("pdf", input_signature="S1")
+    sources_sig = {r["id"]: r["_source"] for r in result_sig}
+    assert sources_sig["R002"] == "via_signature"
+
+
+# ---------------------------------------------------------------------------
+# apply_outcome / decay_inactive_rules (slice 4)
+# ---------------------------------------------------------------------------
+
+def test_apply_outcome_success_rewards_all(tmp_path):
+    """apply_outcome(Outcome.SUCCESS) rewards every rule in the bank:
+    +0.02 confidence, +1 support. Replaces the three duplicated loops.
+
+    5-rule bank, all at confidence 0.80, support 3. After SUCCESS, all
+    five are at 0.82 with support 4.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        {"id": f"R00{i}", "confidence": 0.80, "support": 3}
+        for i in range(1, 6)
+    ])
+    bank.apply_outcome(Outcome.SUCCESS)
+    rules = bank.load_rules()
+    assert len(rules) == 5
+    for r in rules:
+        assert r["confidence"] == 0.82
+        assert r["support"] == 4
+
+
+def test_apply_outcome_failure_penalizes_all(tmp_path):
+    """apply_outcome(Outcome.FAILURE) penalizes every rule: -0.05
+    confidence. Support is unchanged on failure."""
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        {"id": f"R00{i}", "confidence": 0.80, "support": 3}
+        for i in range(1, 6)
+    ])
+    bank.apply_outcome(Outcome.FAILURE)
+    rules = bank.load_rules()
+    assert len(rules) == 5
+    for r in rules:
+        assert r["confidence"] == 0.75
+        assert r["support"] == 3
+
+
+def test_apply_outcome_failure_archives_below_threshold(tmp_path):
+    """A rule that drops below 0.3 after FAILURE is archived (gone from
+    the bank), not just clamped. A rule at 0.32 → 0.27 → archived.
+
+    This is the lifecycle contract: archived rules don't linger at 0.3
+    or below — they're removed so they stop reaching the prompt.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        {"id": "R001", "confidence": 0.32, "support": 1},  # → 0.27, archived
+        {"id": "R002", "confidence": 0.80, "support": 2},  # → 0.75, kept
+    ])
+    bank.apply_outcome(Outcome.FAILURE)
+    rules = bank.load_rules()
+    ids = [r["id"] for r in rules]
+    assert "R001" not in ids          # archived
+    assert ids == ["R002"]            # only survivor
+
+
+def test_apply_outcome_returns_archived_count(tmp_path):
+    """apply_outcome returns the number of rules archived, so callers
+    (and tests) can observe churn without diffing the rule set.
+
+    Mixed bank: two rules archive on FAILURE (0.32→0.27, 0.30→0.25),
+    three survive. Returns 2.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        {"id": "R001", "confidence": 0.32, "support": 1},  # → 0.27 archived
+        {"id": "R002", "confidence": 0.30, "support": 1},  # → 0.25 archived
+        {"id": "R003", "confidence": 0.80, "support": 2},  # → 0.75 kept
+        {"id": "R004", "confidence": 0.90, "support": 4},  # → 0.85 kept
+        {"id": "R005", "confidence": 0.50, "support": 1},  # → 0.45 kept
+    ])
+    archived = bank.apply_outcome(Outcome.FAILURE)
+    assert archived == 2
+    assert len(bank.load_rules()) == 3
+
+
+def test_decay_inactive_rules_prunes_stale(tmp_path):
+    """decay_inactive_rules multiplies a stale rule's confidence by
+    0.99^(days_since_use - 30). A rule unused 60 days decays by 0.99^30.
+
+    Absorbs the dead decay_rules function from rule_evolution.py into
+    the Bank, where it can read/write its own files. The math is
+    unchanged; only the home moves.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    old_last_used = (datetime.now() - timedelta(days=60)).isoformat()
+    recent_last_used = (datetime.now() - timedelta(days=5)).isoformat()
+    bank.save_rules([
+        {"id": "R001", "confidence": 0.8, "last_used": old_last_used},
+        {"id": "R002", "confidence": 0.9, "last_used": recent_last_used},
+    ])
+    bank.decay_inactive_rules()
+    rules = {r["id"]: r for r in bank.load_rules()}
+    # R001: 0.8 * 0.99^(60-30) = 0.8 * 0.99^30 ≈ 0.5918
+    expected = round(0.8 * (0.99 ** 30), 4)
+    assert rules["R001"]["confidence"] == expected
+    assert rules["R001"]["confidence"] < 0.8   # actually decayed
+    # R002: recent, no decay
+    assert rules["R002"]["confidence"] == 0.9
+
+
+def test_decay_inactive_rules_handles_tz_aware_last_used(tmp_path):
+    """decay_inactive_rules must not crash when last_used carries a
+    timezone offset (e.g. written by another process as UTC).
+
+    datetime.fromisoformat returns an aware datetime for an offset
+    timestamp; subtracting our naive `now` raises TypeError (not
+    ValueError). A crash here would take down retrieve_rules() — and
+    thus every extraction — so the rule must be skipped gracefully.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        {"id": "R001", "confidence": 0.8,
+         "last_used": "2025-01-01T00:00:00+00:00"},
+    ])
+    # Must not raise. Returns an int (count archived); the rule is old
+    # enough that it may or may not be pruned — the contract here is
+    # solely "no TypeError crash".
+    archived = bank.decay_inactive_rules()
+    assert isinstance(archived, int)
+
+
+def test_decay_inactive_rules_archives_below_threshold(tmp_path):
+    """If decay drops a rule below 0.3, it's archived (removed), not
+    just left lingering. A rule at 0.31 unused 100 days decays to
+    ~0.15 and is gone.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    old_last_used = (datetime.now() - timedelta(days=100)).isoformat()
+    bank.save_rules([
+        {"id": "R001", "confidence": 0.31, "last_used": old_last_used},  # decays < 0.3
+        {"id": "R002", "confidence": 0.9, "last_used": old_last_used},   # decays but survives
+    ])
+    archived = bank.decay_inactive_rules()
+    rules = bank.load_rules()
+    ids = [r["id"] for r in rules]
+    assert "R001" not in ids        # archived
+    assert "R002" in ids            # survived
+    assert archived == 1
+
+
+# ---------------------------------------------------------------------------
+# retrieve_rules lazy decay + last_used + _source persistence (slice 4)
+# ---------------------------------------------------------------------------
+
+def test_retrieve_rules_triggers_lazy_decay(tmp_path):
+    """retrieve_rules() runs decay_inactive_rules() before retrieval —
+    stale rules are pruned on read, not on a separate cron.
+
+    A rule unused 60 days at confidence 0.8: after retrieve_rules("pdf"),
+    the on-disk rule's confidence should be decayed (0.8 * 0.99^30 ≈ 0.59),
+    not the original 0.8. Lazy decay at retrieval time means the bank
+    never serves a stale rule to the prompt.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    old_last_used = (datetime.now() - timedelta(days=60)).isoformat()
+    rule = _rule("R001", input_type="pdf", confidence=0.8)
+    rule["last_used"] = old_last_used
+    bank.save_rules([rule])
+    bank.retrieve_rules("pdf")
+    on_disk = bank.load_rules()
+    expected = round(0.8 * (0.99 ** 30), 4)
+    assert on_disk[0]["confidence"] == expected
+    assert on_disk[0]["confidence"] < 0.8
+
+
+def test_retrieve_rules_updates_last_used(tmp_path):
+    """retrieve_rules() freshens last_used on every rule it returns, so
+    frequently-retrieved rules don't decay.
+
+    A rule with last_used=60-days-ago is retrieved. After retrieval, the
+    on-disk rule's last_used is ≈ now (within the call window), not the
+    stale timestamp. This is what keeps a hot rule from decaying: each
+    retrieval resets its inactivity clock.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    old_last_used = (datetime.now() - timedelta(days=60)).isoformat()
+    rule = _rule("R001", input_type="pdf", confidence=0.8)
+    rule["last_used"] = old_last_used
+    bank.save_rules([rule])
+    before = datetime.now()
+    bank.retrieve_rules("pdf")
+    after = datetime.now()
+    on_disk = bank.load_rules()
+    retrieved_last_used = datetime.fromisoformat(on_disk[0]["last_used"])
+    assert before <= retrieved_last_used <= after
+
+
+def test_retrieve_rules_does_not_persist_source(tmp_path):
+    """_source is in-memory provenance only — it must NEVER be written
+    to rules.jsonl, even though slice 4 makes retrieve_rules rewrite
+    the file twice (decay, then last_used freshening).
+
+    Regression guard: exercise all three sources (direct, via_kg,
+    via_signature) in one retrieval so the rewrite path is stressed,
+    then reload from disk and assert no rule carries _source. A leaked
+    _source would corrupt the rule schema and confuse later retrievals.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        _rule("R001", input_type="pdf", confidence=0.9),    # direct + via_signature
+        _rule("R002", input_type="excel", confidence=0.7),  # via_kg (shared anchor)
+    ])
+    bank.save_knowledge_graph({"schema_version": "1.0", "edges": [
+        _edge("R001", "A1", "uses_anchor"),
+        _edge("R002", "A1", "uses_anchor"),
+    ]})
+    bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "S1",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R001"]},
+    ])
+    result = bank.retrieve_rules("pdf", input_signature="S1")
+    # Result carries _source tags (provenance is useful in-memory).
+    sources = {r["id"]: r.get("_source") for r in result}
+    assert sources["R001"] == "via_signature"
+    assert sources["R002"] == "via_kg"
+    # On disk: no rule carries _source.
+    on_disk = bank.load_rules()
+    for r in on_disk:
+        assert "_source" not in r

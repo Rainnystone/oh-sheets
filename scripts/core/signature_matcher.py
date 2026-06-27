@@ -6,17 +6,23 @@ def calculate_signature(content: str) -> str:
 
 def match_patterns(signature: str, patterns: list, top_k: int = 3, threshold: float = 0.8) -> list:
     """
-    Find success patterns matching the input signature.
+    Find success patterns for the input signature.
 
-    1. First tries exact signature match.
-    2. If no exact match, returns patterns with accuracy >= threshold.
-    3. Results are sorted by accuracy (highest first).
+    1. Exact signature match: return matching patterns sorted by accuracy.
+    2. No exact match: FALLBACK by accuracy — return patterns with
+       accuracy >= threshold, sorted by accuracy. This is NOT a signature
+       similarity computation; it returns historically-accurate patterns
+       regardless of their signature. Renamed internally from "similar"
+       to avoid implying signature comparison.
+
+    True signature similarity would require vector embeddings and is out
+    of scope (see PRD non-goals).
 
     Args:
         signature: The input signature to match.
         patterns: List of success patterns with input_signature and accuracy.
         top_k: Maximum number of results to return.
-        threshold: Minimum accuracy for similarity match (used when no exact match).
+        threshold: Minimum accuracy for the fallback (used when no exact match).
 
     Returns:
         List of matching patterns, sorted by accuracy.
@@ -26,6 +32,6 @@ def match_patterns(signature: str, patterns: list, top_k: int = 3, threshold: fl
     if exact_matches:
         return sorted(exact_matches, key=lambda x: x.get("accuracy", 0.0), reverse=True)[:top_k]
 
-    # No exact match - return similar patterns by accuracy threshold
-    similar = [p for p in patterns if p.get("accuracy", 0.0) >= threshold]
-    return sorted(similar, key=lambda x: x.get("accuracy", 0.0), reverse=True)[:top_k]
+    # No exact match — accuracy-based fallback (NOT signature similarity).
+    by_accuracy = [p for p in patterns if p.get("accuracy", 0.0) >= threshold]
+    return sorted(by_accuracy, key=lambda x: x.get("accuracy", 0.0), reverse=True)[:top_k]
