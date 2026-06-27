@@ -253,15 +253,19 @@ class RALPHLoop:
         """
         input_sig = calculate_signature(input_content)
 
-        # Record success pattern
-        patterns = self.bank.load_success_patterns()
-        patterns.append({
-            "input_signature": input_sig,
-            "accuracy": 1.0,
-            "data": extracted,
-            "created_at": datetime.now().isoformat()
-        })
-        self.bank.save_success_patterns(patterns)
+        # Slice 3: single writer. phase4_commit doesn't carry the retrieved
+        # rule set in scope (phase3_test used them internally), so
+        # rules_used/anchors_matched are empty here — the learning loop
+        # records that this input succeeded; rule association can be
+        # enriched later when phase3 returns the rules it used.
+        self.bank.record_success_pattern(
+            input_signature=input_sig,
+            input_type=self.input_type,
+            extracted=extracted,
+            rules_used=[],
+            anchors_matched=[],
+            accuracy=1.0,
+        )
 
         # Update rule confidence
         rules = self.bank.load_rules()

@@ -243,12 +243,19 @@ def run_orchestrator(args):
                 r["support"] = ur.get("support", r.get("support", 0))
     bank.save_rules(all_rules)
 
-    patterns.append({
-        "input_signature": input_sig,
-        "accuracy": 1.0,
-        "data": extracted
-    })
-    bank.save_success_patterns(patterns)
+    # Slice 3: single writer. record_success_pattern populates the full
+    # §3.4 schema (pattern_id, input_type, fields_extracted, rules_used,
+    # anchors_matched, ...). rules_used is the retrieved set (an
+    # over-approximation — we don't instrument which rules the LLM
+    # actually used); anchors_matched is the loaded anchor keys.
+    bank.record_success_pattern(
+        input_signature=input_sig,
+        input_type=input_type,
+        extracted=extracted,
+        rules_used=[r["id"] for r in rules],
+        anchors_matched=list(anchors.keys()) if isinstance(anchors, dict) else [],
+        accuracy=1.0,
+    )
 
     result = {"status": "success", "output": str(args.output)}
     if formula_conflicts:
