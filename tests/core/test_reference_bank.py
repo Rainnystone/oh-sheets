@@ -413,3 +413,30 @@ def test_record_success_pattern_generates_sequential_ids(tmp_path):
         rules_used=[], anchors_matched=[],
     )
     assert bank2.load_success_patterns()[-1]["pattern_id"] == "P006"
+
+
+def test_record_success_pattern_appends_not_overwrites(tmp_path):
+    """record_success_pattern appends; existing patterns survive.
+
+    Critical for the success-history invariant: the bank accumulates
+    patterns over time. The old inline writers called save_success_patterns
+    with a freshly-built list, which was correct only because they loaded
+    first — but the contract must be explicit: never overwrite.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "old_sig",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R001"]},
+    ])
+    bank.record_success_pattern(
+        input_signature="new_sig", input_type="excel",
+        extracted={"x": "1"}, rules_used=["R002"], anchors_matched=[],
+    )
+    patterns = bank.load_success_patterns()
+    assert len(patterns) == 2
+    # Old pattern preserved unchanged.
+    assert patterns[0]["pattern_id"] == "P001"
+    assert patterns[0]["input_signature"] == "old_sig"
+    # New pattern appended with next ID.
+    assert patterns[1]["pattern_id"] == "P002"
+    assert patterns[1]["input_signature"] == "new_sig"
