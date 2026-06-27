@@ -101,8 +101,8 @@ class ReferenceBank:
         rules = self.load_rules()
         matched = [
             r for r in rules
-            if r.get("when", {}).get("trigger") == trigger
-            and r.get("when", {}).get("input_type") in (input_type, "auto")
+            if r.get("when", {}).get("trigger", "field_extraction") == trigger
+            and r.get("when", {}).get("input_type", "auto") in (input_type, "auto")
             and r.get("confidence", 0.0) >= 0.3
         ]
         # Dedupe by rule ID — keep highest-confidence copy.

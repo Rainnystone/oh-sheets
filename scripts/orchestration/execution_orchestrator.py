@@ -227,12 +227,21 @@ def run_orchestrator(args):
         "output": str(args.output)
     })
 
-    updated_rules = []
-    for r in rules:
-        ur = update_rule_confidence(r, 1.0)
-        if ur is not None:
-            updated_rules.append(ur)
-    bank.save_rules(updated_rules)
+    # Reward retrieved rules with success outcome, then save the FULL bank.
+    # Don't overwrite with `updated_rules` (the retrieved subset) — that
+    # would delete every non-retrieved rule and persist the in-memory
+    # _source tag. Merge confidences into load_rules() before saving.
+    retrieved_ids = {r.get("id") for r in rules}
+    all_rules = bank.load_rules()
+    for r in all_rules:
+        if r.get("id") in retrieved_ids:
+            ur = update_rule_confidence(r, 1.0)
+            if ur is not None:
+                # Preserve non-confidence fields from the on-disk rule
+                # (don't leak _source into the persisted dict).
+                r["confidence"] = ur["confidence"]
+                r["support"] = ur.get("support", r.get("support", 0))
+    bank.save_rules(all_rules)
 
     patterns.append({
         "input_signature": input_sig,
