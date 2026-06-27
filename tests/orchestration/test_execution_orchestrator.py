@@ -512,3 +512,257 @@ if __name__ == "__main__":
             f"degraded extraction recorded rules_used="
             f"{patterns[0].get('rules_used')!r} — should be empty"
         )
+
+
+class _StubBank:
+    """Duck-typed stand-in for ReferenceBank.
+
+    _retrieve_context accepts the bank as a dependency (instead of
+    constructing one internally), so a unit test can pass this stub and
+    observe exactly which methods were called with which arguments —
+    no on-disk ReferenceBank required.
+    """
+    def __init__(self, rules=None, anchors=None, patterns=None):
+        self._rules = rules if rules is not None else []
+        self._anchors = anchors if anchors is not None else {}
+        self._patterns = patterns if patterns is not None else []
+        self.received_input_type = None
+        self.received_input_signature = None
+
+    def retrieve_rules(self, input_type, input_signature=None):
+        self.received_input_type = input_type
+        self.received_input_signature = input_signature
+        return self._rules
+
+    def load_anchors(self):
+        return self._anchors
+
+    def load_success_patterns(self):
+        return self._patterns
+
+
+def test_retrieve_context_assembles_context_when_signature_known():
+    """_retrieve_context builds the full extraction context — signature,
+    input_type, rules, anchors, patterns, matched, signature_mismatch —
+    behind one call, threading (input_type, input_signature) into
+    retrieve_rules.
+
+    Slice 6b (god-function decomposition, candidate 02). With a known
+    signature stored in the bank, the input is NOT a new variant.
+    """
+    import hashlib
+    from scripts.orchestration.execution_orchestrator import _retrieve_context
+
+    content = "hello world"
+    input_sig = hashlib.md5(content.encode("utf-8")).hexdigest()
+    rules = [{"id": "R001"}]
+    anchors = {"anchor_a": {"row": 2}}
+    patterns = [{"input_signature": input_sig, "accuracy": 1.0}]
+
+    bank = _StubBank(rules=rules, anchors=anchors, patterns=patterns)
+    ctx = _retrieve_context(bank, content, "sample.pdf")
+
+    assert ctx.input_sig == input_sig
+    assert ctx.input_type == "pdf"
+    assert ctx.rules == rules
+    assert ctx.anchors == anchors
+    assert ctx.patterns == patterns
+    # exact signature match -> the stored pattern is returned by match_patterns
+    assert ctx.matched == patterns
+    assert ctx.signature_mismatch is False
+    # the bank was queried with the right (input_type, input_signature)
+    assert bank.received_input_type == "pdf"
+    assert bank.received_input_signature == input_sig
+
+
+def test_retrieve_context_flags_new_variant_when_signature_unseen():
+    """When stored patterns exist but none match the input signature,
+    signature_mismatch is True (new variant detected)."""
+    from scripts.orchestration.execution_orchestrator import _retrieve_context
+
+    patterns = [{"input_signature": "some_other_signature", "accuracy": 0.9}]
+    bank = _StubBank(patterns=patterns)
+
+    ctx = _retrieve_context(bank, "a brand new variant", "sample.md")
+
+    assert ctx.input_type == "md"
+    assert ctx.signature_mismatch is True
+    # no exact match -> match_patterns falls back to accuracy >= threshold
+    assert ctx.matched == patterns
+
+
+def test_retrieve_context_no_mismatch_when_no_patterns_stored():
+    """With no stored patterns there is nothing to compare against, so
+    signature_mismatch stays False (the `patterns and ...` guard)."""
+    from scripts.orchestration.execution_orchestrator import _retrieve_context
+
+    bank = _StubBank(patterns=[])
+    ctx = _retrieve_context(bank, "fresh start, no history", "sample.txt")
+
+    assert ctx.signature_mismatch is False
+    assert ctx.matched == []
+    assert ctx.input_type == "md"
+
+
+def test_detect_formula_conflicts_removes_field_mapping_to_formula_cell(tmp_path):
+    """A schema field whose target cell holds a formula is reported as a
+    conflict and dropped from the extracted data so the formula cell is
+    never overwritten.
+
+    Slice 6c (god-function decomposition, candidate 02).
+    """
+    import openpyxl
+    from scripts.orchestration.execution_orchestrator import _detect_formula_conflicts
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["D5"] = "=SUM(D2:D4)"  # formula cell
+    wb.save(str(tmp_path / "template.xlsx"))
+
+    schema = {
+        "fields": {
+            "Field_A": {"cell": "B2", "type": "string"},   # plain cell
+            "Field_B": {"cell": "D5", "type": "number"},    # formula cell -> conflict
+        }
+    }
+    extracted = {"Field_A": "keep me", "Field_B": 100}
+
+    result_extracted, conflicts = _detect_formula_conflicts(schema, extracted, tmp_path)
+
+    assert conflicts == [{"field": "Field_B", "cell": "D5"}]
+    assert "Field_B" not in result_extracted
+    assert result_extracted["Field_A"] == "keep me"
+
+
+def test_detect_formula_conflicts_no_conflict_when_cell_is_plain(tmp_path):
+    """No conflict when schema fields map to plain (non-formula) cells."""
+    import openpyxl
+    from scripts.orchestration.execution_orchestrator import _detect_formula_conflicts
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["B2"] = ""
+    wb.save(str(tmp_path / "template.xlsx"))
+
+    schema = {"fields": {"Field_A": {"cell": "B2", "type": "string"}}}
+    extracted = {"Field_A": "value"}
+
+    result_extracted, conflicts = _detect_formula_conflicts(schema, extracted, tmp_path)
+
+    assert conflicts == []
+    assert result_extracted == {"Field_A": "value"}
+
+
+def test_detect_formula_conflicts_swallows_analysis_failure(tmp_path):
+    """If formula analysis fails (e.g. no template.xlsx present), the step
+    returns the extracted data untouched with no conflicts — it never
+    blocks the run. Mirrors the original `except Exception: pass` guard.
+    """
+    from scripts.orchestration.execution_orchestrator import _detect_formula_conflicts
+
+    schema = {"fields": {"Field_A": {"cell": "B2", "type": "string"}}}
+    extracted = {"Field_A": "value"}
+    # tmp_path has no template.xlsx -> analyze_workbook_formulas raises
+
+    result_extracted, conflicts = _detect_formula_conflicts(schema, extracted, tmp_path)
+
+    assert conflicts == []
+    assert result_extracted == {"Field_A": "value"}
+
+
+class _RecordingBank:
+    """Duck-typed stand-in for ReferenceBank's success-side writes.
+
+    Captures apply_outcome and record_success_pattern calls so a unit
+    test can assert exactly what the bank was told — no on-disk
+    ReferenceBank required.
+    """
+    def __init__(self):
+        self.outcomes = []
+        self.recorded_patterns = []
+
+    def apply_outcome(self, outcome):
+        self.outcomes.append(outcome)
+
+    def record_success_pattern(self, **kwargs):
+        self.recorded_patterns.append(kwargs)
+
+
+def test_validate_returns_missing_fields():
+    """_validate returns the list of required schema fields absent from
+    the extracted data.
+
+    Slice 6d (god-function decomposition, candidate 02).
+    """
+    from scripts.orchestration.execution_orchestrator import _validate
+
+    schema = {"fields": {"Field_A": {"cell": "B2"}, "Field_B": {"cell": "C2"}}}
+    extracted = {"Field_A": "v"}  # Field_B missing
+
+    assert _validate(extracted, schema) == ["Field_B"]
+
+
+def test_validate_returns_empty_when_all_fields_present():
+    """When every required schema field is present, _validate returns []."""
+    from scripts.orchestration.execution_orchestrator import _validate
+
+    schema = {"fields": {"Field_A": {"cell": "B2"}, "Field_B": {"cell": "C2"}}}
+    extracted = {"Field_A": "v", "Field_B": "w"}
+
+    assert _validate(extracted, schema) == []
+
+
+def test_record_outcome_rewards_rules_and_records_pattern():
+    """_record_outcome applies SUCCESS to every rule and records a success
+    pattern carrying the retrieved rule ids in rules_used (not degraded).
+
+    Slice 6d (god-function decomposition, candidate 02).
+    """
+    from scripts.orchestration.execution_orchestrator import _record_outcome, _RetrievalContext
+    from scripts.core.rule_evolution import Outcome
+
+    bank = _RecordingBank()
+    ctx = _RetrievalContext(
+        rules=[{"id": "R001"}, {"id": "R002"}],
+        anchors={"anchor_a": {"row": 1}},
+        patterns=[],
+        matched=[],
+        input_sig="abc123",
+        input_type="md",
+        signature_mismatch=False,
+    )
+
+    _record_outcome(bank, ctx, extracted={"Field_A": "v"}, degraded_level=1)
+
+    assert bank.outcomes == [Outcome.SUCCESS]
+    assert len(bank.recorded_patterns) == 1
+    pat = bank.recorded_patterns[0]
+    assert pat["input_signature"] == "abc123"
+    assert pat["input_type"] == "md"
+    assert pat["extracted"] == {"Field_A": "v"}
+    assert pat["rules_used"] == ["R001", "R002"]  # not degraded -> rules recorded
+    assert pat["anchors_matched"] == ["anchor_a"]
+    assert pat["accuracy"] == 1.0
+
+
+def test_record_outcome_omits_rules_used_when_degraded():
+    """A degraded (level>1) extraction never sent rules to the LLM, so
+    rules_used must be [] to avoid corrupting signature preference
+    (Codex PR #3 review P2)."""
+    from scripts.orchestration.execution_orchestrator import _record_outcome, _RetrievalContext
+
+    bank = _RecordingBank()
+    ctx = _RetrievalContext(
+        rules=[{"id": "R001"}],
+        anchors={},
+        patterns=[],
+        matched=[],
+        input_sig="abc123",
+        input_type="md",
+        signature_mismatch=False,
+    )
+
+    _record_outcome(bank, ctx, extracted={"Field_A": "v"}, degraded_level=2)
+
+    pat = bank.recorded_patterns[0]
+    assert pat["rules_used"] == []  # degraded -> rules never reached the prompt

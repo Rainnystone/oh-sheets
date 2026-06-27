@@ -88,31 +88,32 @@ def _coerce_schema_bindings(schema_obj):
 
 
 def write_excel(template_path, data_path, schema_path, output_path):
-    try:
-        wb = openpyxl.load_workbook(template_path)
-        ws = wb.active
-        
-        with open(data_path, 'r') as f:
-            data = json.load(f)
-            
-        with open(schema_path, 'r') as f:
-            schema = json.load(f)
+    """Write extracted data into a template Excel file at the schema-bound cells.
 
-        bindings = _coerce_schema_bindings(schema)
-        for field_key, target_cell, spec in bindings:
-            if field_key in data:
-                ws[target_cell] = data[field_key]
-                continue
-            if isinstance(spec, dict):
-                name = spec.get("name")
-                if isinstance(name, str) and name in data:
-                    ws[target_cell] = data[name]
-                
-        wb.save(output_path)
-        sys.exit(0)
-    except Exception as e:
-        print(f"Error writing excel: {e}", file=sys.stderr)
-        sys.exit(1)
+    Library function — raises on failure (does not call sys.exit). Only the
+    __main__ block translates a raised exception into a process exit code, so
+    callers (and tests) can invoke this directly.
+    """
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb.active
+
+    with open(data_path, 'r') as f:
+        data = json.load(f)
+
+    with open(schema_path, 'r') as f:
+        schema = json.load(f)
+
+    bindings = _coerce_schema_bindings(schema)
+    for field_key, target_cell, spec in bindings:
+        if field_key in data:
+            ws[target_cell] = data[field_key]
+            continue
+        if isinstance(spec, dict):
+            name = spec.get("name")
+            if isinstance(name, str) and name in data:
+                ws[target_cell] = data[name]
+
+    wb.save(output_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -121,4 +122,8 @@ if __name__ == "__main__":
     parser.add_argument('--schema', required=True)
     parser.add_argument('--output', required=True)
     args = parser.parse_args()
-    write_excel(args.template, args.data, args.schema, args.output)
+    try:
+        write_excel(args.template, args.data, args.schema, args.output)
+    except Exception as e:
+        print(f"Error writing excel: {e}", file=sys.stderr)
+        sys.exit(1)
