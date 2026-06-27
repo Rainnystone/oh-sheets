@@ -27,16 +27,18 @@ class ReferenceBank:
         self._pending_rule_ids: set[str] = set()
 
     def _next_rule_id(self) -> str:
-        """Generate the next rule ID as max(existing numeric IDs)+1.
+        """Generate a monotonically-increasing rule ID: max-ever-issued + 1.
 
-        Considers both on-disk rules AND IDs issued by add_rule() since the
-        last save_rules() — so a batch of unsaved add_rule() calls produces
-        unique IDs (fixes the phase2_draft collision where every rule got
-        R001 because the disk was still empty mid-batch).
+        Scans every store that can reference a rule ID — rules.jsonl,
+        success_patterns.jsonl (rules_used), and knowledge_graph.json
+        edge endpoints — plus IDs issued by add_rule() since the last
+        save_rules(). An ID is never reused, even after its rule is
+        archived: a success pattern or KG edge may still name the old
+        ID, and reissuing it would resolve that reference to an
+        unrelated new rule (corrupting signature/KG retrieval).
         """
         max_n = 0
-        for r in self.load_rules():
-            rid = r.get("id", "")
+        for rid in self._all_known_rule_ids():
             m = re.match(r"^R(\d+)$", rid)
             if m:
                 max_n = max(max_n, int(m.group(1)))
@@ -45,6 +47,28 @@ class ReferenceBank:
             if m:
                 max_n = max(max_n, int(m.group(1)))
         return f"R{max_n + 1:03d}"
+
+    def _all_known_rule_ids(self) -> set[str]:
+        """Every rule ID referenced anywhere in the Bank's stores.
+
+        Used by _next_rule_id to keep IDs monotonic across archives.
+        Includes: rules on disk, every pattern's rules_used, and any
+        KG edge endpoint that looks like a rule ID (R\\d+). Anchor IDs
+        on uses_anchor edges don't match R\\d+ and are naturally
+        excluded; a wrongly-named anchor could at worst skip a number
+        (harmless gap), never reuse one.
+        """
+        ids: set[str] = set()
+        for r in self.load_rules():
+            if r.get("id"):
+                ids.add(r["id"])
+        for p in self.load_success_patterns():
+            ids.update(p.get("rules_used", []))
+        for e in self.load_knowledge_graph().get("edges", []):
+            for endpoint in (e.get("from"), e.get("to")):
+                if isinstance(endpoint, str) and re.match(r"^R\d+$", endpoint):
+                    ids.add(endpoint)
+        return ids
 
     def add_rule(
         self,

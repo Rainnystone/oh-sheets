@@ -326,6 +326,40 @@ def test_add_rule_unique_ids_within_unsaved_batch(tmp_path):
     assert next_rule["id"] == "R004"
 
 
+def test_next_rule_id_never_reuses_archived_id_referenced_by_pattern(tmp_path):
+    """A rule ID is never reused, even after the rule is archived, if a
+    success pattern (or KG edge) still references it.
+
+    P1 regression: phase5_reflect archives an existing rule via
+    apply_outcome(FAILURE), then add_rule() computes the next ID from
+    the post-archive bank. If the archived rule had the highest ID
+    (e.g. R005), _next_rule_id would reissue R005 for the new repair
+    rule — and a success pattern whose rules_used still names the old
+    R005 would resolve to the unrelated new rule, corrupting signature
+    retrieval. IDs must be monotonic across everything the Bank stores.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        _rule("R001", input_type="pdf", confidence=0.80),
+        _rule("R005", input_type="pdf", confidence=0.32),  # will be archived
+    ])
+    # A historical success pattern still names R005 in rules_used.
+    bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "S1",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R005"]},
+    ])
+    # Archive R005: 0.32 → 0.27, below threshold.
+    bank.apply_outcome(Outcome.FAILURE)
+    assert [r["id"] for r in bank.load_rules()] == ["R001"]
+
+    # The next rule must be R006 (max-ever-issued + 1), NOT R005 reused.
+    new_rule = bank.add_rule(
+        input_type="pdf", trigger="field_extraction",
+        field="vendor", action="retry_extract",
+    )
+    assert new_rule["id"] == "R006"
+
+
 def test_reference_bank_crud(tmp_path):
     bank_dir = tmp_path / "reference_bank"
     bank = ReferenceBank(str(bank_dir))
