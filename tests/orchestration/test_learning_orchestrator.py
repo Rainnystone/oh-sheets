@@ -2,6 +2,7 @@
 import json
 import tempfile
 from pathlib import Path
+import pytest
 import openpyxl
 from scripts.orchestration.learning_orchestrator import RALPHLoop
 
@@ -217,3 +218,87 @@ def test_ralph_loop_full_cycle():
 
         assert result["status"] in ["committed", "reflected"]
         assert result["phase_reached"] >= 4  # Should reach at least COMMIT phase
+
+
+# ---------------------------------------------------------------------------
+# phase2_draft: auto-create uses_anchor edges (slice 2)
+# ---------------------------------------------------------------------------
+
+def test_phase2_draft_creates_uses_anchor_edge(tmp_path):
+    """phase2_draft auto-creates uses_anchor edges for rules that
+    reference an anchor in their field_spec.
+
+    Given a field "Invoice_Number" whose field_spec carries anchor="A1",
+    phase2_draft should:
+    1. Build a rule whose `then` dict carries anchor="A1".
+    2. Persist a {from: rule_id, to: "A1", relation: "uses_anchor"} edge
+       in the knowledge graph.
+
+    This is the write-side that makes slice 2's KG expansion observable:
+    without edges being written, _expand_via_kg would have no neighbors.
+    """
+    ralph = RALPHLoop(str(tmp_path))
+    ralph.input_type = "pdf"
+
+    fields = {
+        "Invoice_Number": {"cell": "B2", "type": "string", "anchor": "A1"},
+    }
+    rules = ralph.phase2_draft({}, fields)
+
+    assert len(rules) == 1
+    rule = rules[0]
+    # The rule carries the anchor reference in its `then` block — this
+    # is what ties the rule to the anchor in downstream logic.
+    assert rule["then"]["anchor"] == "A1"
+
+    # The knowledge graph now has exactly one uses_anchor edge from
+    # this rule to A1.
+    graph = ralph.bank.load_knowledge_graph()
+    matching = [
+        e for e in graph.get("edges", [])
+        if e.get("relation") == "uses_anchor"
+        and e.get("from") == rule["id"]
+        and e.get("to") == "A1"
+    ]
+    assert len(matching) == 1
+
+
+def test_phase2_draft_edge_creation_idempotent(tmp_path):
+    """Re-adding the same (rule_id, anchor_id, uses_anchor) edge is a
+    no-op — the knowledge graph never contains duplicate edges.
+
+    Scenario: phase2_draft runs once and creates rule R001 with anchor
+    A1, persisting edge (R001, A1, uses_anchor). We then force a second
+    phase2_draft call to reuse rule ID R001 (simulating a rerun over
+    the same rule) for the same anchor. The edge must NOT be duplicated.
+    """
+    ralph = RALPHLoop(str(tmp_path))
+    ralph.input_type = "pdf"
+
+    fields = {"Invoice_Number": {"cell": "B2", "anchor": "A1"}}
+    rules1 = ralph.phase2_draft({}, fields)
+    rule_id = rules1[0]["id"]
+    assert rule_id == "R001"
+
+    # Sanity: edge exists after first draft.
+    def _count_edges(rule_id, anchor):
+        g = ralph.bank.load_knowledge_graph()
+        return sum(
+            1 for e in g.get("edges", [])
+            if e.get("from") == rule_id
+            and e.get("to") == anchor
+            and e.get("relation") == "uses_anchor"
+        )
+    assert _count_edges(rule_id, "A1") == 1
+
+    # Force phase2_draft to reuse the same rule ID (R001) on the next
+    # call. This simulates a rerun that reprocesses the same rule.
+    original_next = ralph.bank._next_rule_id
+    ralph.bank._next_rule_id = lambda: rule_id
+    try:
+        ralph.phase2_draft({}, fields)
+    finally:
+        ralph.bank._next_rule_id = original_next
+
+    # Edge count is still 1 — idempotent.
+    assert _count_edges(rule_id, "A1") == 1

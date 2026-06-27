@@ -1,6 +1,16 @@
 # scripts/core/prompt_builder.py
 import json
 
+# Slice 2: provenance labels for _source tags. In-memory only — these
+# never appear in persisted rules. Direct rules get no label (default);
+# rules reached via knowledge-graph expansion get an explicit note so the
+# LLM knows they were inferred rather than directly matched.
+_PROVENANCE_LABEL = {
+    "via_kg": "知识图谱关联",
+    "via_signature": "签名匹配",
+}
+
+
 def format_rules_as_few_shot(rules: list) -> str:
     """
     Format rules as few-shot examples with confidence/support header.
@@ -10,6 +20,10 @@ def format_rules_as_few_shot(rules: list) -> str:
     - 触发条件: 提取 {field_name} 字段时
     - 操作: {action_description}
     - 示例: "{input_example}" → "{output_example}"
+
+    Slice 2: if a rule carries `_source` (set in-memory by
+    ReferenceBank.retrieve_rules), append a 来源 provenance note to the
+    header line. Direct rules and rules without _source render unchanged.
     """
     if not rules:
         return "暂无规则"
@@ -23,7 +37,12 @@ def format_rules_as_few_shot(rules: list) -> str:
         confidence = rule.get("confidence", 0)
         support = rule.get("support", 0)
 
-        lines.append(f"\n规则 {rule_id} [置信度: {confidence}, 成功次数: {support}]:")
+        header = f"\n规则 {rule_id} [置信度: {confidence}, 成功次数: {support}"
+        provenance = _PROVENANCE_LABEL.get(rule.get("_source", ""))
+        if provenance:
+            header += f", 来源: {provenance}"
+        header += "]:"
+        lines.append(header)
 
         # Trigger condition
         condition = rule.get("condition", {})

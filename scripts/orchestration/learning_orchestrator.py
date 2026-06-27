@@ -141,21 +141,67 @@ class RALPHLoop:
         Generate initial rules based on anchors and fields. Rules are tagged
         with self.input_type (set by run_full_cycle) so future inputs of the
         same type can retrieve them. Uses bank.add_rule() for unique IDs.
+
+        Slice 2: when a field_spec carries an `anchor` key, the rule's
+        `then` block records it AND a `uses_anchor` edge is written to
+        the knowledge graph. This is the write-side that makes slice 2's
+        KG expansion (retrieve_rules → _expand_via_kg) observable: edges
+        written here become neighbors in future retrievals.
         """
         if hasattr(self, '_draft_rules'):
             return self._draft_rules(anchors, fields)
 
         rules = []
+        new_edges: list[dict] = []
         for field_name, field_spec in fields.items():
-            if isinstance(field_spec, dict):
-                rules.append(self.bank.add_rule(
-                    input_type=self.input_type,
-                    trigger="field_extraction",
-                    field=field_name,
-                    action="semantic_extract",
-                    confidence=0.5,
-                ))
+            if not isinstance(field_spec, dict):
+                continue
+            anchor_id = field_spec.get("anchor")
+            then_clause: dict = {"action": "semantic_extract"}
+            if anchor_id:
+                then_clause["anchor"] = anchor_id
+            rule = self.bank.add_rule(
+                input_type=self.input_type,
+                trigger="field_extraction",
+                field=field_name,
+                action="semantic_extract",
+                confidence=0.5,
+                then=then_clause,
+            )
+            rules.append(rule)
+            if anchor_id:
+                new_edges.append({
+                    "from": rule["id"],
+                    "to": anchor_id,
+                    "relation": "uses_anchor",
+                    "weight": 1.0,
+                })
+
+        if new_edges:
+            self._add_kg_edges_idempotent(new_edges)
         return rules
+
+    def _add_kg_edges_idempotent(self, new_edges: list[dict]) -> None:
+        """Append edges to the knowledge graph, skipping duplicates.
+
+        A duplicate is an edge with the same (from, to, relation) triple.
+        Keeps the graph clean when phase2_draft is re-run over the same
+        rule+anchor pairs (e.g. a re-learning pass over the same sample).
+        """
+        graph = self.bank.load_knowledge_graph()
+        existing = {
+            (e.get("from"), e.get("to"), e.get("relation"))
+            for e in graph.get("edges", [])
+        }
+        changed = False
+        for e in new_edges:
+            key = (e["from"], e["to"], e["relation"])
+            if key not in existing:
+                graph.setdefault("edges", []).append(e)
+                existing.add(key)
+                changed = True
+        if changed:
+            self.bank.save_knowledge_graph(graph)
 
     def phase3_test(self, input_content: str, schema: dict) -> tuple:
         """
