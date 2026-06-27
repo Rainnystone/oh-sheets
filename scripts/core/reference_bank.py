@@ -192,6 +192,19 @@ class ReferenceBank:
                 result.append({**r, "_source": "direct"})
             else:
                 result.append(r)
+
+        # Slice 4: freshen last_used for retrieved rules. A rule that
+        # reached the prompt was "used" — reset its inactivity clock so
+        # it doesn't decay on the next retrieval. Persist without
+        # _source (that's in-memory only — reloaded rules never carry it).
+        retrieved_ids = {r.get("id") for r in result}
+        if retrieved_ids:
+            now_iso = datetime.now().isoformat()
+            persisted = self.load_rules()
+            for r in persisted:
+                if r.get("id") in retrieved_ids:
+                    r["last_used"] = now_iso
+            self.save_rules(persisted)
         return result
 
     def _expand_via_kg(self, direct_rule_ids: set) -> list:

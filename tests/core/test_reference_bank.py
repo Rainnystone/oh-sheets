@@ -667,3 +667,25 @@ def test_retrieve_rules_triggers_lazy_decay(tmp_path):
     expected = round(0.8 * (0.99 ** 30), 4)
     assert on_disk[0]["confidence"] == expected
     assert on_disk[0]["confidence"] < 0.8
+
+
+def test_retrieve_rules_updates_last_used(tmp_path):
+    """retrieve_rules() freshens last_used on every rule it returns, so
+    frequently-retrieved rules don't decay.
+
+    A rule with last_used=60-days-ago is retrieved. After retrieval, the
+    on-disk rule's last_used is ≈ now (within the call window), not the
+    stale timestamp. This is what keeps a hot rule from decaying: each
+    retrieval resets its inactivity clock.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    old_last_used = (datetime.now() - timedelta(days=60)).isoformat()
+    rule = _rule("R001", input_type="pdf", confidence=0.8)
+    rule["last_used"] = old_last_used
+    bank.save_rules([rule])
+    before = datetime.now()
+    bank.retrieve_rules("pdf")
+    after = datetime.now()
+    on_disk = bank.load_rules()
+    retrieved_last_used = datetime.fromisoformat(on_disk[0]["last_used"])
+    assert before <= retrieved_last_used <= after
