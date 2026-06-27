@@ -482,3 +482,39 @@ def test_retrieve_rules_no_signature_no_preference(tmp_path):
     # No input_signature → R001 stays "direct".
     result = bank.retrieve_rules("pdf")
     assert result[0]["_source"] == "direct"
+
+
+def test_retrieve_rules_via_signature_overrides_via_kg(tmp_path):
+    """A rule reachable both via_kg AND via_signature keeps via_signature.
+
+    R001 (pdf) is direct. R002 (excel) shares anchor A1 with R001, so
+    without signature preference R002 would be via_kg. But R002 is also
+    in a success pattern's rules_used for signature S1 — so when
+    retrieving with input_signature=S1, R002's provenance upgrades from
+    via_kg to via_signature (the stronger signal wins).
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        _rule("R001", input_type="pdf", confidence=0.9),
+        _rule("R002", input_type="excel", confidence=0.7),
+    ])
+    # R002 is a 1-hop KG neighbor of R001 (shared anchor A1).
+    bank.save_knowledge_graph({"schema_version": "1.0", "edges": [
+        _edge("R001", "A1", "uses_anchor"),
+        _edge("R002", "A1", "uses_anchor"),
+    ]})
+    # R002 also succeeded on signature S1 before.
+    bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "S1",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R002"]},
+    ])
+
+    # Without signature: R002 is via_kg.
+    result_no_sig = bank.retrieve_rules("pdf")
+    sources_no_sig = {r["id"]: r["_source"] for r in result_no_sig}
+    assert sources_no_sig["R002"] == "via_kg"
+
+    # With signature S1: R002 upgrades to via_signature.
+    result_sig = bank.retrieve_rules("pdf", input_signature="S1")
+    sources_sig = {r["id"]: r["_source"] for r in result_sig}
+    assert sources_sig["R002"] == "via_signature"
