@@ -195,18 +195,6 @@ def run_orchestrator(args):
 
     try:
         write_excel(str(template_dir / "template.xlsx"), tmp_data_path, str(schema_path), str(args.output))
-    except SystemExit as e:
-        if e.code != 0:
-            error_msg = f"write_excel failed with exit code {e.code}"
-            print(json.dumps({"status": "failed", "stage": "write_excel", "error": error_msg}, ensure_ascii=False, indent=2))
-            log_execution(memory_dir, {
-                "status": "failed",
-                "stage": "write_excel",
-                "error": error_msg,
-                "input_signature": input_sig
-            })
-            os.remove(tmp_data_path)
-            return 1
     except Exception as e:
         error_msg = str(e)
         print(json.dumps({"status": "failed", "stage": "write_excel", "error": error_msg}, ensure_ascii=False, indent=2))
@@ -218,7 +206,6 @@ def run_orchestrator(args):
         })
         os.remove(tmp_data_path)
         return 1
-        
     os.remove(tmp_data_path)
 
     log_execution(memory_dir, {
