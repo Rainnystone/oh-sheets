@@ -217,6 +217,51 @@ class ReferenceBank:
 
     def load_success_patterns(self) -> list:
         return self._load_jsonl(self.patterns_file)
+
+    def _next_pattern_id(self) -> str:
+        """Generate the next pattern ID as max(existing numeric IDs)+1.
+
+        Same convention as _next_rule_id: P001, P002, ... Considers
+        on-disk patterns only (record_success_pattern persists on every
+        call, so there's no pending set to track).
+        """
+        max_n = 0
+        for p in self.load_success_patterns():
+            pid = p.get("pattern_id", "")
+            m = re.match(r"^P(\d+)$", pid)
+            if m:
+                max_n = max(max_n, int(m.group(1)))
+        return f"P{max_n + 1:03d}"
+
+    def record_success_pattern(
+        self,
+        input_signature: str,
+        input_type: str,
+        extracted: dict,
+        rules_used: list,
+        anchors_matched: list,
+        accuracy: float = 1.0,
+    ) -> None:
+        """Single writer for success patterns (slice 3).
+
+        Populates the full spec §3.4 schema and persists immediately
+        (append) to success_patterns.jsonl. Replaces the two inline
+        appenders in the orchestrators and the dead writer in
+        local_few_shot_memory.
+        """
+        pattern = {
+            "pattern_id": self._next_pattern_id(),
+            "input_signature": input_signature,
+            "input_type": input_type,
+            "fields_extracted": list(extracted.keys()),
+            "accuracy": accuracy,
+            "rules_used": list(rules_used),
+            "anchors_matched": list(anchors_matched),
+            "created_at": datetime.now().isoformat(),
+        }
+        patterns = self.load_success_patterns()
+        patterns.append(pattern)
+        self.save_success_patterns(patterns)
         
     def save_knowledge_graph(self, graph: dict):
         with open(self.graph_file, 'w', encoding='utf-8') as f:

@@ -1,5 +1,7 @@
 import os
+import re
 import json
+from datetime import datetime, timedelta
 from scripts.core.reference_bank import ReferenceBank
 
 
@@ -342,3 +344,43 @@ def test_reference_bank_crud(tmp_path):
     # Test Knowledge Graph
     bank.save_knowledge_graph({"edges": [{"from": "R001", "to": "R002"}]})
     assert bank.load_knowledge_graph()["edges"][0]["from"] == "R001"
+
+
+# ---------------------------------------------------------------------------
+# record_success_pattern (slice 3)
+# ---------------------------------------------------------------------------
+
+def test_record_success_pattern_populates_full_schema(tmp_path):
+    """record_success_pattern is the single writer for success patterns.
+
+    It must populate the full spec §3.4 schema: pattern_id, input_signature,
+    input_type, fields_extracted, accuracy, rules_used, anchors_matched,
+    created_at. Before this slice, two inline writers wrote different
+    partial schemas and a third dead writer existed.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.record_success_pattern(
+        input_signature="sig_abc",
+        input_type="pdf",
+        extracted={"vendor_name": "ABC Corp", "amount": "1000"},
+        rules_used=["R001", "R002"],
+        anchors_matched=["A1"],
+        accuracy=1.0,
+    )
+    patterns = bank.load_success_patterns()
+    assert len(patterns) == 1
+    p = patterns[0]
+    # Full §3.4 schema — all eight fields present.
+    assert set(p.keys()) >= {
+        "pattern_id", "input_signature", "input_type", "fields_extracted",
+        "accuracy", "rules_used", "anchors_matched", "created_at",
+    }
+    assert p["input_signature"] == "sig_abc"
+    assert p["input_type"] == "pdf"
+    assert p["fields_extracted"] == ["vendor_name", "amount"]
+    assert p["accuracy"] == 1.0
+    assert p["rules_used"] == ["R001", "R002"]
+    assert p["anchors_matched"] == ["A1"]
+    assert p["pattern_id"].startswith("P")
+    # created_at is an ISO timestamp (parseable).
+    datetime.fromisoformat(p["created_at"])
