@@ -598,3 +598,28 @@ def test_apply_outcome_returns_archived_count(tmp_path):
     archived = bank.apply_outcome(Outcome.FAILURE)
     assert archived == 2
     assert len(bank.load_rules()) == 3
+
+
+def test_decay_inactive_rules_prunes_stale(tmp_path):
+    """decay_inactive_rules multiplies a stale rule's confidence by
+    0.99^(days_since_use - 30). A rule unused 60 days decays by 0.99^30.
+
+    Absorbs the dead decay_rules function from rule_evolution.py into
+    the Bank, where it can read/write its own files. The math is
+    unchanged; only the home moves.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    old_last_used = (datetime.now() - timedelta(days=60)).isoformat()
+    recent_last_used = (datetime.now() - timedelta(days=5)).isoformat()
+    bank.save_rules([
+        {"id": "R001", "confidence": 0.8, "last_used": old_last_used},
+        {"id": "R002", "confidence": 0.9, "last_used": recent_last_used},
+    ])
+    bank.decay_inactive_rules()
+    rules = {r["id"]: r for r in bank.load_rules()}
+    # R001: 0.8 * 0.99^(60-30) = 0.8 * 0.99^30 ≈ 0.5918
+    expected = round(0.8 * (0.99 ** 30), 4)
+    assert rules["R001"]["confidence"] == expected
+    assert rules["R001"]["confidence"] < 0.8   # actually decayed
+    # R002: recent, no decay
+    assert rules["R002"]["confidence"] == 0.9

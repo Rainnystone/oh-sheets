@@ -320,6 +320,43 @@ class ReferenceBank:
                 kept.append(ur)
         self.save_rules(kept)
         return archived_count
+
+    def decay_inactive_rules(self, days: int = 30) -> int:
+        """Slice 4: prune long-unused rules.
+
+        A rule unused for > `days` has confidence multiplied by
+        0.99^(days_since_use - days). Rules that drop below 0.3 are
+        archived. Persists the updated rule set. Returns count archived.
+
+        Absorbs the dead decay_rules function from rule_evolution.py —
+        same math, but reads from / writes to the Bank's own files.
+        Called lazily by retrieve_rules() so stale rules are always
+        pruned before reaching the prompt.
+        """
+        rules = self.load_rules()
+        now = datetime.now()
+        kept: list[dict] = []
+        archived_count = 0
+        for rule in rules:
+            decayed = rule.copy()
+            last_used_str = decayed.get("last_used")
+            if last_used_str:
+                try:
+                    last_used = datetime.fromisoformat(last_used_str)
+                    days_since_use = (now - last_used).days
+                    if days_since_use > days:
+                        decay_factor = 0.99 ** (days_since_use - days)
+                        decayed["confidence"] = round(
+                            decayed.get("confidence", 0.5) * decay_factor, 4
+                        )
+                except ValueError:
+                    pass
+            if decayed.get("confidence", 0.5) >= 0.3:
+                kept.append(decayed)
+            else:
+                archived_count += 1
+        self.save_rules(kept)
+        return archived_count
         
     def save_knowledge_graph(self, graph: dict):
         with open(self.graph_file, 'w', encoding='utf-8') as f:
