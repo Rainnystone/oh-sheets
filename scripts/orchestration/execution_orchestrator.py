@@ -24,6 +24,18 @@ def _read_schema_field_names(schema):
     fields = schema.get("fields", {})
     return [str(name) for name, spec in fields.items() if isinstance(spec, dict)]
 
+def _fail(memory_dir: Path, input_sig: str, payload: dict) -> int:
+    """Print a failure payload as JSON, log it with the input signature,
+    and return exit code 1.
+
+    Collapses the duplicated print + log_execution + return 1 shape that
+    previously appeared verbatim in the exhausted_degradation, validation,
+    and write_excel failure branches of run_orchestrator.
+    """
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    log_execution(memory_dir, {**payload, "input_signature": input_sig})
+    return 1
+
 def _try_extraction_with_degradation(
     content: str,
     schema: dict,
@@ -132,42 +144,24 @@ def run_orchestrator(args):
     )
 
     if extracted is None:
-        print(json.dumps({
+        return _fail(memory_dir, input_sig, {
             "status": "failed",
             "stage": "exhausted_degradation",
             "level": degraded_level,
             "error": error_msg
-        }, ensure_ascii=False, indent=2))
-        log_execution(memory_dir, {
-            "status": "failed",
-            "stage": "exhausted_degradation",
-            "level": degraded_level,
-            "error": error_msg,
-            "input_signature": input_sig
         })
-        return 1
-        
+
     # Validation Phase
     expected_fields = _read_schema_field_names(schema)
     missing_fields = [field for field in expected_fields if field not in extracted]
 
     if missing_fields:
-        error_msg = "Extracted data missing required fields."
-        result = {
+        return _fail(memory_dir, input_sig, {
             "status": "failed",
             "stage": "validation",
             "missing_fields": missing_fields,
-            "error": error_msg
-        }
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        log_execution(memory_dir, {
-            "status": "failed",
-            "stage": "validation",
-            "missing_fields": missing_fields,
-            "error": error_msg,
-            "input_signature": input_sig
+            "error": "Extracted data missing required fields."
         })
-        return 1
 
     # Formula conflict detection
     formula_conflicts = []
@@ -196,16 +190,12 @@ def run_orchestrator(args):
     try:
         write_excel(str(template_dir / "template.xlsx"), tmp_data_path, str(schema_path), str(args.output))
     except Exception as e:
-        error_msg = str(e)
-        print(json.dumps({"status": "failed", "stage": "write_excel", "error": error_msg}, ensure_ascii=False, indent=2))
-        log_execution(memory_dir, {
+        os.remove(tmp_data_path)
+        return _fail(memory_dir, input_sig, {
             "status": "failed",
             "stage": "write_excel",
-            "error": error_msg,
-            "input_signature": input_sig
+            "error": str(e)
         })
-        os.remove(tmp_data_path)
-        return 1
     os.remove(tmp_data_path)
 
     log_execution(memory_dir, {
