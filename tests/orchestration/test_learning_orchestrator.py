@@ -302,3 +302,28 @@ def test_phase2_draft_edge_creation_idempotent(tmp_path):
 
     # Edge count is still 1 — idempotent.
     assert _count_edges(rule_id, "A1") == 1
+
+
+# ---------------------------------------------------------------------------
+# phase5_reflect: new rules keep creation confidence (slice 4 bugfix)
+# ---------------------------------------------------------------------------
+
+def test_phase5_reflect_new_rules_keep_creation_confidence(tmp_path):
+    """phase5_reflect creates new repair rules at 0.6 for each missing
+    field. Those NEW rules must keep 0.6 — they must NOT receive the
+    failure penalty applied to existing rules.
+
+    Bug: the old code ran update_rule_confidence(r, 0.2) over ALL rules
+    in new_rules (existing + newly created), so a brand-new rule created
+    at 0.6 was immediately penalized to 0.55. A rule just invented to
+    fix a failure hasn't been tested yet — it shouldn't be punished for
+    that same failure.
+    """
+    ralph = RALPHLoop(str(tmp_path))
+    ralph.input_type = "pdf"
+    failure_info = {"missing_fields": ["Vendor_Name"], "error": "incomplete"}
+    result = ralph.phase5_reflect(failure_info, existing_rules=[])
+    # One new rule created for the missing field.
+    assert len(result) == 1
+    # The new rule keeps its creation confidence (0.6), not penalized to 0.55.
+    assert result[0]["confidence"] == 0.6

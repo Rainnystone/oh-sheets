@@ -283,6 +283,13 @@ class RALPHLoop:
         Phase 5: REFLECT
 
         Analyze failure and generate/update rules.
+
+        Slice 4: new repair rules keep their creation confidence (0.6) —
+        they're not penalized for the failure they were created to fix.
+        Only rules that existed before this reflection receive the
+        failure penalty. A rule just invented to repair a missing field
+        hasn't been tested yet, so penalizing it would snuff it out
+        before it ever got a fair trial.
         """
         if hasattr(self, '_analyze_failure'):
             new_rules = self._analyze_failure(failure_info, existing_rules)
@@ -299,12 +306,17 @@ class RALPHLoop:
                     confidence=0.6,
                 ))
 
-        # Update confidence of existing rules (failure signal)
+        # Penalize existing rules only (failure signal). New rules created
+        # above keep their creation confidence — they haven't been tested.
+        existing_ids = {r.get("id") for r in existing_rules}
         updated_rules = []
         for r in new_rules:
-            ur = update_rule_confidence(r, 0.2)  # Low outcome = confidence decrease
-            if ur is not None:
-                updated_rules.append(ur)
+            if r.get("id") in existing_ids:
+                ur = update_rule_confidence(r, 0.2)  # Low outcome = confidence decrease
+                if ur is not None:
+                    updated_rules.append(ur)
+            else:
+                updated_rules.append(r)
 
         return updated_rules
 
