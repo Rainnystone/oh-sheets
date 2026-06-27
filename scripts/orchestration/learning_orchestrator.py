@@ -33,6 +33,12 @@ class RALPHLoop:
         # that create rules (phase2_draft, phase5_reflect) and phases that
         # retrieve them (phase3_test). Defaults to "md" for direct callers.
         self.input_type = "md"
+        # Rule IDs phase3_test retrieved on its most recent call. phase4_commit
+        # reads this so the success pattern's rules_used records which rules
+        # actually reached the prompt (Codex PR #3 review P2). Reset at the
+        # start of every phase3_test; empty when the custom _execute_extraction
+        # path is used (it bypasses the bank).
+        self._last_retrieved_rule_ids: list = []
 
     def run_full_cycle(self, sample_input: str, target_excel: str, max_retries: int = 5) -> dict:
         """
@@ -210,6 +216,9 @@ class RALPHLoop:
 
         Returns: (success: bool, result: dict)
         """
+        # Reset the retrieved-rule stash for this attempt. phase4_commit
+        # (only called on success, immediately after this) reads it.
+        self._last_retrieved_rule_ids = []
         if hasattr(self, '_execute_extraction'):
             extracted = self._execute_extraction(input_content)
         else:
@@ -217,15 +226,18 @@ class RALPHLoop:
             from scripts.extraction.llm_extractor import extract_data
             from scripts.core.prompt_builder import build_context_prompt
 
+            retrieved = self.bank.retrieve_rules(
+                self.input_type,
+                input_signature=schema.get("meta", {}).get("signature"),
+            )
+            # Stash the IDs phase4_commit will record in rules_used.
+            self._last_retrieved_rule_ids = [r.get("id") for r in retrieved]
             prompt = build_context_prompt(
                 template_signature=schema.get("meta", {}).get("signature", ""),
                 schema_fields=schema.get("fields", {}),
                 formula_constraints=schema.get("formula_constraints", []),
                 anchors=self.bank.load_anchors(),
-                rules=self.bank.retrieve_rules(
-                    self.input_type,
-                    input_signature=schema.get("meta", {}).get("signature"),
-                ),
+                rules=retrieved,
                 success_patterns=[],
                 input_content=input_content
             )
@@ -255,16 +267,16 @@ class RALPHLoop:
         """
         input_sig = calculate_signature(input_content)
 
-        # Slice 3: single writer. phase4_commit doesn't carry the retrieved
-        # rule set in scope (phase3_test used them internally), so
-        # rules_used/anchors_matched are empty here — the learning loop
-        # records that this input succeeded; rule association can be
-        # enriched later when phase3 returns the rules it used.
+        # Slice 3: single writer. phase4_commit records the rule IDs phase3_test
+        # retrieved (stashed on self) into rules_used, so future signature-
+        # preference lookups can associate this input with the rules that
+        # reached the prompt. anchors_matched stays empty here — anchor
+        # matching happens in the extractor, not the orchestrator.
         self.bank.record_success_pattern(
             input_signature=input_sig,
             input_type=self.input_type,
             extracted=extracted,
-            rules_used=[],
+            rules_used=list(self._last_retrieved_rule_ids),
             anchors_matched=[],
             accuracy=1.0,
         )

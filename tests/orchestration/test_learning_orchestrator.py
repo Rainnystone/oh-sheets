@@ -438,3 +438,41 @@ def test_phase3_test_threads_signature_into_retrieval(tmp_path, monkeypatch):
     # R001 was retrieved via signature → its last_used was freshened.
     on_disk = ralph.bank.load_rules()
     assert on_disk[0].get("last_used") is not None
+
+
+def test_phase4_commit_records_retrieved_rule_ids_in_success_pattern(tmp_path, monkeypatch):
+    """phase4_commit records the rule IDs phase3_test retrieved into the
+    success pattern's rules_used.
+
+    Codex PR #3 review (P2): phase4_commit recorded rules_used=[] because
+    phase3_test consumed the retrieved rules internally and never handed
+    them back. With rules_used always empty, signature preference (slice
+    3) could never accumulate rule associations in the learning loop —
+    the via_signature path was dead in self-learning.
+
+    R001 is a direct match for input_type="md". phase3_test retrieves it
+    (and stashes the IDs); phase4_commit then writes a success pattern
+    whose rules_used names R001.
+    """
+    ralph = RALPHLoop(str(tmp_path))
+    ralph.input_type = "md"
+    ralph.bank.save_rules([{
+        "id": "R001",
+        "when": {"input_type": "md", "trigger": "field_extraction"},
+        "condition": {"field": "x"}, "then": {"action": "semantic_extract"},
+        "confidence": 0.8, "support": 0,
+    }])
+    schema = {"meta": {"signature": "S1"},
+              "fields": {"x": {"cell": "A1", "type": "string"}}}
+
+    import scripts.extraction.llm_extractor as llm
+    monkeypatch.setattr(llm, "extract_data", lambda prompt: {"x": "v"})
+    ralph._validate = lambda extracted, schema: (True, [])
+
+    success, extracted = ralph.phase3_test("dummy content", schema)
+    assert success
+    ralph.phase4_commit("dummy content", extracted)
+
+    patterns = ralph.bank.load_success_patterns()
+    assert len(patterns) == 1
+    assert "R001" in patterns[0].get("rules_used", [])
