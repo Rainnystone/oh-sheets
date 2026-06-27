@@ -668,3 +668,101 @@ def test_detect_formula_conflicts_swallows_analysis_failure(tmp_path):
 
     assert conflicts == []
     assert result_extracted == {"Field_A": "value"}
+
+
+class _RecordingBank:
+    """Duck-typed stand-in for ReferenceBank's success-side writes.
+
+    Captures apply_outcome and record_success_pattern calls so a unit
+    test can assert exactly what the bank was told — no on-disk
+    ReferenceBank required.
+    """
+    def __init__(self):
+        self.outcomes = []
+        self.recorded_patterns = []
+
+    def apply_outcome(self, outcome):
+        self.outcomes.append(outcome)
+
+    def record_success_pattern(self, **kwargs):
+        self.recorded_patterns.append(kwargs)
+
+
+def test_validate_returns_missing_fields():
+    """_validate returns the list of required schema fields absent from
+    the extracted data.
+
+    Slice 6d (god-function decomposition, candidate 02).
+    """
+    from scripts.orchestration.execution_orchestrator import _validate
+
+    schema = {"fields": {"Field_A": {"cell": "B2"}, "Field_B": {"cell": "C2"}}}
+    extracted = {"Field_A": "v"}  # Field_B missing
+
+    assert _validate(extracted, schema) == ["Field_B"]
+
+
+def test_validate_returns_empty_when_all_fields_present():
+    """When every required schema field is present, _validate returns []."""
+    from scripts.orchestration.execution_orchestrator import _validate
+
+    schema = {"fields": {"Field_A": {"cell": "B2"}, "Field_B": {"cell": "C2"}}}
+    extracted = {"Field_A": "v", "Field_B": "w"}
+
+    assert _validate(extracted, schema) == []
+
+
+def test_record_outcome_rewards_rules_and_records_pattern():
+    """_record_outcome applies SUCCESS to every rule and records a success
+    pattern carrying the retrieved rule ids in rules_used (not degraded).
+
+    Slice 6d (god-function decomposition, candidate 02).
+    """
+    from scripts.orchestration.execution_orchestrator import _record_outcome, _RetrievalContext
+    from scripts.core.rule_evolution import Outcome
+
+    bank = _RecordingBank()
+    ctx = _RetrievalContext(
+        rules=[{"id": "R001"}, {"id": "R002"}],
+        anchors={"anchor_a": {"row": 1}},
+        patterns=[],
+        matched=[],
+        input_sig="abc123",
+        input_type="md",
+        signature_mismatch=False,
+    )
+
+    _record_outcome(bank, ctx, extracted={"Field_A": "v"}, degraded_level=1)
+
+    assert bank.outcomes == [Outcome.SUCCESS]
+    assert len(bank.recorded_patterns) == 1
+    pat = bank.recorded_patterns[0]
+    assert pat["input_signature"] == "abc123"
+    assert pat["input_type"] == "md"
+    assert pat["extracted"] == {"Field_A": "v"}
+    assert pat["rules_used"] == ["R001", "R002"]  # not degraded -> rules recorded
+    assert pat["anchors_matched"] == ["anchor_a"]
+    assert pat["accuracy"] == 1.0
+
+
+def test_record_outcome_omits_rules_used_when_degraded():
+    """A degraded (level>1) extraction never sent rules to the LLM, so
+    rules_used must be [] to avoid corrupting signature preference
+    (Codex PR #3 review P2)."""
+    from scripts.orchestration.execution_orchestrator import _record_outcome, _RetrievalContext
+
+    bank = _RecordingBank()
+    ctx = _RetrievalContext(
+        rules=[{"id": "R001"}],
+        anchors={},
+        patterns=[],
+        matched=[],
+        input_sig="abc123",
+        input_type="md",
+        signature_mismatch=False,
+    )
+
+    _record_outcome(bank, ctx, extracted={"Field_A": "v"}, degraded_level=2)
+
+    pat = bank.recorded_patterns[0]
+    assert pat["rules_used"] == []  # degraded -> rules never reached the prompt
