@@ -578,3 +578,23 @@ def test_apply_outcome_failure_archives_below_threshold(tmp_path):
     ids = [r["id"] for r in rules]
     assert "R001" not in ids          # archived
     assert ids == ["R002"]            # only survivor
+
+
+def test_apply_outcome_returns_archived_count(tmp_path):
+    """apply_outcome returns the number of rules archived, so callers
+    (and tests) can observe churn without diffing the rule set.
+
+    Mixed bank: two rules archive on FAILURE (0.32→0.27, 0.30→0.25),
+    three survive. Returns 2.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        {"id": "R001", "confidence": 0.32, "support": 1},  # → 0.27 archived
+        {"id": "R002", "confidence": 0.30, "support": 1},  # → 0.25 archived
+        {"id": "R003", "confidence": 0.80, "support": 2},  # → 0.75 kept
+        {"id": "R004", "confidence": 0.90, "support": 4},  # → 0.85 kept
+        {"id": "R005", "confidence": 0.50, "support": 1},  # → 0.45 kept
+    ])
+    archived = bank.apply_outcome(Outcome.FAILURE)
+    assert archived == 2
+    assert len(bank.load_rules()) == 3
