@@ -559,3 +559,22 @@ def test_apply_outcome_failure_penalizes_all(tmp_path):
     for r in rules:
         assert r["confidence"] == 0.75
         assert r["support"] == 3
+
+
+def test_apply_outcome_failure_archives_below_threshold(tmp_path):
+    """A rule that drops below 0.3 after FAILURE is archived (gone from
+    the bank), not just clamped. A rule at 0.32 → 0.27 → archived.
+
+    This is the lifecycle contract: archived rules don't linger at 0.3
+    or below — they're removed so they stop reaching the prompt.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        {"id": "R001", "confidence": 0.32, "support": 1},  # → 0.27, archived
+        {"id": "R002", "confidence": 0.80, "support": 2},  # → 0.75, kept
+    ])
+    bank.apply_outcome(Outcome.FAILURE)
+    rules = bank.load_rules()
+    ids = [r["id"] for r in rules]
+    assert "R001" not in ids          # archived
+    assert ids == ["R002"]            # only survivor
