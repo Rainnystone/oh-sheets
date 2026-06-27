@@ -340,3 +340,88 @@ if __name__ == "__main__":
         assert payload["status"] in ["success", "degraded"]
         # Check that formula conflict is detected
         assert payload.get("formula_conflict") == True or "formula" in payload.get("message", "").lower()
+
+
+def test_run_orchestrator_threads_signature_into_retrieve_rules():
+    """run_orchestrator passes the input content's signature into
+    retrieve_rules so via_signature promotion fires in production.
+
+    Codex PR #3 review (P2): the execution orchestrator called
+    retrieve_rules(input_type) without input_signature, so rules
+    reachable only via a matched success pattern were never retrieved.
+    R001 here is input_type="pdf" — invisible to an "md" (.dat) query
+    directly. A success pattern whose input_signature equals the MD5 of
+    the input content names R001 in rules_used. Observing that R001's
+    last_used was freshened proves the signature was threaded:
+    retrieve_rules only freshens last_used on rules it returns.
+    """
+    import hashlib
+    with tempfile.TemporaryDirectory() as workdir:
+        template_dir = Path(workdir)
+        template_path = template_dir / "template.xlsx"
+        schema_path = template_dir / "schema.json"
+        input_path = template_dir / "input.dat"
+        output_path = template_dir / "out.xlsx"
+
+        _write_template(template_path)
+        _write_schema(schema_path)
+
+        content = "dummy content for signature threading"
+        input_path.write_text(content)
+        input_sig = hashlib.md5(content.encode("utf-8")).hexdigest()
+
+        # Pre-populate the bank: R001 is pdf (invisible to .dat -> "md").
+        bank_dir = template_dir / "reference_bank"
+        bank_dir.mkdir()
+        (bank_dir / "rules.jsonl").write_text(json.dumps({
+            "id": "R001",
+            "when": {"input_type": "pdf", "trigger": "field_extraction"},
+            "condition": {"field": "Field_A"},
+            "then": {"action": "semantic_extract"},
+            "confidence": 0.8,
+            "support": 0,
+        }) + "\n")
+        # Pattern whose signature matches the input, naming R001.
+        (bank_dir / "success_patterns.jsonl").write_text(json.dumps({
+            "pattern_id": "P001",
+            "input_signature": input_sig,
+            "input_type": "pdf",
+            "accuracy": 1.0,
+            "rules_used": ["R001"],
+        }) + "\n")
+
+        mock_extractor_path = template_dir / "mock_extractor.py"
+        mock_extractor_content = """import sys, json
+import scripts.orchestration.execution_orchestrator as eo
+import scripts.io.excel_writer
+
+def mock_extract(prompt):
+    return {"Field_A": "A", "Field_B": "B"}
+
+eo.extract_data = mock_extract
+scripts.io.excel_writer.write_excel = lambda t, d, s, o: open(o, "w").write("dummy excel")
+
+if __name__ == "__main__":
+    class Args:
+        template_dir = sys.argv[1]
+        input = sys.argv[2]
+        output = sys.argv[3]
+    sys.exit(eo.run_orchestrator(Args()))
+"""
+        mock_extractor_path.write_text(mock_extractor_content)
+
+        result = subprocess.run(
+            [sys.executable, str(mock_extractor_path), str(template_dir), str(input_path), str(output_path)],
+            capture_output=True,
+            text=True,
+            env={"PYTHONPATH": ".", **os.environ}
+        )
+
+        # R001 was retrieved via signature -> its last_used was freshened on disk.
+        from scripts.core.reference_bank import ReferenceBank
+        bank = ReferenceBank(str(bank_dir))
+        rules = bank.load_rules()
+        assert rules[0].get("last_used") is not None, (
+            f"R001 last_used not freshened — signature not threaded. "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )

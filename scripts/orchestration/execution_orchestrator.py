@@ -107,7 +107,7 @@ def run_orchestrator(args):
     bank = ReferenceBank(str(template_dir / "reference_bank"))
 
     input_type = _determine_input_type(args.input)
-    rules = bank.retrieve_rules(input_type)
+    rules = bank.retrieve_rules(input_type, input_signature=input_sig)
     anchors = bank.load_anchors()
     patterns = bank.load_success_patterns()
     formulas = extract_formulas_from_schema(schema)
