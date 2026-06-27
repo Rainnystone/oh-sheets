@@ -361,6 +361,14 @@ class ReferenceBank:
             if last_used_str:
                 try:
                     last_used = datetime.fromisoformat(last_used_str)
+                    # Normalize tz-aware timestamps (e.g. UTC written by
+                    # another process) to naive local wall-clock so the
+                    # subtraction against our naive `now` doesn't raise
+                    # TypeError. Day-granularity decay tolerates the
+                    # offset shift. astimezone() on a naive datetime is
+                    # a no-op, so this branch handles both shapes.
+                    if last_used.tzinfo is not None:
+                        last_used = last_used.astimezone().replace(tzinfo=None)
                     days_since_use = (now - last_used).days
                     if days_since_use > days:
                         decay_factor = 0.99 ** (days_since_use - days)

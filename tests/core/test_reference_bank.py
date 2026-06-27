@@ -625,6 +625,27 @@ def test_decay_inactive_rules_prunes_stale(tmp_path):
     assert rules["R002"]["confidence"] == 0.9
 
 
+def test_decay_inactive_rules_handles_tz_aware_last_used(tmp_path):
+    """decay_inactive_rules must not crash when last_used carries a
+    timezone offset (e.g. written by another process as UTC).
+
+    datetime.fromisoformat returns an aware datetime for an offset
+    timestamp; subtracting our naive `now` raises TypeError (not
+    ValueError). A crash here would take down retrieve_rules() — and
+    thus every extraction — so the rule must be skipped gracefully.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        {"id": "R001", "confidence": 0.8,
+         "last_used": "2025-01-01T00:00:00+00:00"},
+    ])
+    # Must not raise. Returns an int (count archived); the rule is old
+    # enough that it may or may not be pruned — the contract here is
+    # solely "no TypeError crash".
+    archived = bank.decay_inactive_rules()
+    assert isinstance(archived, int)
+
+
 def test_decay_inactive_rules_archives_below_threshold(tmp_path):
     """If decay drops a rule below 0.3, it's archived (removed), not
     just left lingering. A rule at 0.31 unused 100 days decays to
