@@ -19,6 +19,7 @@ from datetime import datetime
 from scripts.core.reference_bank import ReferenceBank
 from scripts.core.rule_evolution import update_rule_confidence
 from scripts.core.signature_matcher import calculate_signature
+from scripts.core.input_type import determine_input_type as _determine_input_type
 
 
 class RALPHLoop:
@@ -29,6 +30,10 @@ class RALPHLoop:
         self.bank = ReferenceBank(str(self.template_dir / "reference_bank"))
         self.memory_dir = self.template_dir / "memory"
         os.makedirs(self.memory_dir, exist_ok=True)
+        # input_type is set per-run by run_full_cycle, threaded to phases
+        # that create rules (phase2_draft, phase5_reflect) and phases that
+        # retrieve them (phase3_test). Defaults to "md" for direct callers.
+        self.input_type = "md"
 
     def run_full_cycle(self, sample_input: str, target_excel: str, max_retries: int = 5) -> dict:
         """
@@ -40,6 +45,10 @@ class RALPHLoop:
         - attempts: number of TEST attempts
         """
         attempts = 0
+
+        # Slice 1: tag the sample input's type so rules learned from it are
+        # retrievable by future inputs of the same type. Falls back to "md".
+        self.input_type = _determine_input_type(sample_input)
 
         # Phase 1: ANALYZE
         analysis = self.phase1_analyze(sample_input, target_excel)
@@ -129,28 +138,23 @@ class RALPHLoop:
         """
         Phase 2: DRAFT
 
-        Generate initial rules based on anchors and fields.
+        Generate initial rules based on anchors and fields. Rules are tagged
+        with self.input_type (set by run_full_cycle) so future inputs of the
+        same type can retrieve them. Uses bank.add_rule() for unique IDs.
         """
         if hasattr(self, '_draft_rules'):
             return self._draft_rules(anchors, fields)
 
         rules = []
-        rule_id = 1
-
         for field_name, field_spec in fields.items():
             if isinstance(field_spec, dict):
-                # Create a basic rule for each field
-                rules.append({
-                    "id": f"R{rule_id:03d}",
-                    "when": {"input_type": "auto", "trigger": "field_extraction"},
-                    "condition": {"field": field_name},
-                    "then": {"action": "semantic_extract"},
-                    "confidence": 0.5,
-                    "support": 0,
-                    "created_at": datetime.now().isoformat()
-                })
-                rule_id += 1
-
+                rules.append(self.bank.add_rule(
+                    input_type=self.input_type,
+                    trigger="field_extraction",
+                    field=field_name,
+                    action="semantic_extract",
+                    confidence=0.5,
+                ))
         return rules
 
     def phase3_test(self, input_content: str, schema: dict) -> tuple:
@@ -173,7 +177,7 @@ class RALPHLoop:
                 schema_fields=schema.get("fields", {}),
                 formula_constraints=schema.get("formula_constraints", []),
                 anchors=self.bank.load_anchors(),
-                rules=self.bank.load_rules(),
+                rules=self.bank.retrieve_rules(self.input_type),
                 success_patterns=[],
                 input_content=input_content
             )
@@ -233,18 +237,17 @@ class RALPHLoop:
         if hasattr(self, '_analyze_failure'):
             new_rules = self._analyze_failure(failure_info, existing_rules)
         else:
-            # Default: create rules for missing fields
-            new_rules = existing_rules.copy()
+            # Default: create rules for missing fields. Use bank.add_rule()
+            # for unique IDs (max+1, not len+1) and real input_type tagging.
+            new_rules = list(existing_rules)
             for field in failure_info.get("missing_fields", []):
-                new_rules.append({
-                    "id": f"R{len(new_rules) + 1:03d}",
-                    "when": {"trigger": "field_extraction"},
-                    "condition": {"field": field},
-                    "then": {"action": "retry_extract"},
-                    "confidence": 0.6,
-                    "support": 0,
-                    "created_at": datetime.now().isoformat()
-                })
+                new_rules.append(self.bank.add_rule(
+                    input_type=self.input_type,
+                    trigger="field_extraction",
+                    field=field,
+                    action="retry_extract",
+                    confidence=0.6,
+                ))
 
         # Update confidence of existing rules (failure signal)
         updated_rules = []

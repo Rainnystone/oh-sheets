@@ -7,10 +7,12 @@ from pathlib import Path
 from scripts.core.reference_bank import ReferenceBank
 from scripts.core.prompt_builder import build_context_prompt
 from scripts.core.signature_matcher import match_patterns, calculate_signature
+from scripts.core.input_type import determine_input_type as _determine_input_type
 from scripts.extraction.formula_analyzer import extract_formulas_from_schema, analyze_workbook_formulas
 from scripts.extraction.llm_extractor import extract_data
 from scripts.io.excel_writer import write_excel
 from scripts.core.rule_evolution import update_rule_confidence
+
 
 def log_execution(memory_dir: Path, record: dict):
     os.makedirs(memory_dir, exist_ok=True)
@@ -103,8 +105,9 @@ def run_orchestrator(args):
         
     input_sig = calculate_signature(content)
     bank = ReferenceBank(str(template_dir / "reference_bank"))
-    
-    rules = bank.load_rules()
+
+    input_type = _determine_input_type(args.input)
+    rules = bank.retrieve_rules(input_type)
     anchors = bank.load_anchors()
     patterns = bank.load_success_patterns()
     formulas = extract_formulas_from_schema(schema)
