@@ -425,3 +425,90 @@ if __name__ == "__main__":
             f"R001 last_used not freshened — signature not threaded. "
             f"stdout={result.stdout!r} stderr={result.stderr!r}"
         )
+
+
+def test_degraded_extraction_omits_rules_used():
+    """A degraded (level>1) extraction records rules_used=[] because the
+    rules were never sent to the LLM.
+
+    Codex PR #3 review (P2): run_orchestrator recorded the full retrieved
+    set in rules_used even when degradation dropped to Level 2 (LLM +
+    anchors only, rules=[] in the prompt). That corrupted signature
+    preference — a future input matching this signature would be told
+    "these rules worked" when they were never in the prompt.
+
+    R001 is retrieved at the top (input_type="md" matches .dat) and would
+    be in the Level 1 prompt, but Level 1 fails and the run degrades to
+    Level 2 (no rules). The recorded success pattern must therefore have
+    rules_used=[].
+    """
+    with tempfile.TemporaryDirectory() as workdir:
+        template_dir = Path(workdir)
+        template_path = template_dir / "template.xlsx"
+        schema_path = template_dir / "schema.json"
+        input_path = template_dir / "input.dat"
+        output_path = template_dir / "out.xlsx"
+
+        _write_template(template_path)
+        _write_schema(schema_path)
+        input_path.write_text("test content")
+
+        # Pre-populate the bank: R001 matches .dat -> "md" so it's retrieved.
+        bank_dir = template_dir / "reference_bank"
+        bank_dir.mkdir()
+        (bank_dir / "rules.jsonl").write_text(json.dumps({
+            "id": "R001",
+            "when": {"input_type": "md", "trigger": "field_extraction"},
+            "condition": {"field": "Field_A"},
+            "then": {"action": "semantic_extract"},
+            "confidence": 0.8,
+            "support": 0,
+        }) + "\n")
+
+        mock_extractor_path = template_dir / "mock_extractor.py"
+        # Level 1 (with rules) fails, Level 2 (anchors only) succeeds.
+        mock_extractor_content = """import sys, json
+import scripts.orchestration.execution_orchestrator as eo
+import scripts.io.excel_writer
+
+call_count = [0]
+
+def mock_extract(prompt):
+    call_count[0] += 1
+    if call_count[0] == 1:
+        raise Exception("Level 1 failed")
+    return {"Field_A": "A", "Field_B": "B"}
+
+eo.extract_data = mock_extract
+scripts.io.excel_writer.write_excel = lambda t, d, s, o: open(o, "w").write("dummy excel")
+
+if __name__ == "__main__":
+    class Args:
+        template_dir = sys.argv[1]
+        input = sys.argv[2]
+        output = sys.argv[3]
+    sys.exit(eo.run_orchestrator(Args()))
+"""
+        mock_extractor_path.write_text(mock_extractor_content)
+
+        result = subprocess.run(
+            [sys.executable, str(mock_extractor_path), str(template_dir), str(input_path), str(output_path)],
+            capture_output=True,
+            text=True,
+            env={"PYTHONPATH": ".", **os.environ}
+        )
+
+        payload = json.loads(result.stdout)
+        # Degraded to level 2 — succeeded without rules in the prompt.
+        assert payload.get("degraded_level") == 2
+
+        # The recorded success pattern must NOT name R001 — it was never
+        # sent to the LLM (Level 2 uses rules=[]).
+        from scripts.core.reference_bank import ReferenceBank
+        bank = ReferenceBank(str(bank_dir))
+        patterns = bank.load_success_patterns()
+        assert len(patterns) == 1
+        assert patterns[0].get("rules_used") == [], (
+            f"degraded extraction recorded rules_used="
+            f"{patterns[0].get('rules_used')!r} — should be empty"
+        )

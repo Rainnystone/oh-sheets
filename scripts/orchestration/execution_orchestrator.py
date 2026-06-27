@@ -238,11 +238,19 @@ def run_orchestrator(args):
     # anchors_matched, ...). rules_used is the retrieved set (an
     # over-approximation — we don't instrument which rules the LLM
     # actually used); anchors_matched is the loaded anchor keys.
+    #
+    # Codex PR #3 review (P2): when degradation dropped to Level 2+ the
+    # rules were never sent to the LLM (Level 2 builds its prompt with
+    # rules=[]; Level 3 is a deterministic extractor with no LLM at all).
+    # Recording them in rules_used would corrupt signature preference —
+    # a future input matching this signature would be told these rules
+    # worked when they were never in the prompt. Omit them when degraded.
+    rules_used = [] if degraded_level > 1 else [r["id"] for r in rules]
     bank.record_success_pattern(
         input_signature=input_sig,
         input_type=input_type,
         extracted=extracted,
-        rules_used=[r["id"] for r in rules],
+        rules_used=rules_used,
         anchors_matched=list(anchors.keys()) if isinstance(anchors, dict) else [],
         accuracy=1.0,
     )
