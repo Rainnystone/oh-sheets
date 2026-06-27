@@ -297,6 +297,16 @@ class RALPHLoop:
             # Default: create rules for missing fields. Use bank.add_rule()
             # for unique IDs (max+1, not len+1) and real input_type tagging.
             new_rules = list(existing_rules)
+            # Reserve existing rule IDs so add_rule won't reuse them. In
+            # production existing_rules == bank.load_rules() (already on
+            # disk, so add_rule sees them), but phase5_reflect must also
+            # work when called directly with rules not yet on disk —
+            # otherwise a new rule collides with an existing ID, inherits
+            # its "existing" status, and gets wrongly penalized.
+            for r in existing_rules:
+                rid = r.get("id")
+                if rid:
+                    self.bank._pending_rule_ids.add(rid)
             for field in failure_info.get("missing_fields", []):
                 new_rules.append(self.bank.add_rule(
                     input_type=self.input_type,

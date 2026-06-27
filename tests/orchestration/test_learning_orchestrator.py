@@ -327,3 +327,30 @@ def test_phase5_reflect_new_rules_keep_creation_confidence(tmp_path):
     assert len(result) == 1
     # The new rule keeps its creation confidence (0.6), not penalized to 0.55.
     assert result[0]["confidence"] == 0.6
+
+
+def test_phase5_reflect_existing_rules_penalized(tmp_path):
+    """Complement to the new-rules-keep-0.6 test: rules that EXISTED
+    before the reflection still receive the failure penalty (-0.05).
+
+    Together the two tests pin down the distinction: existing rules are
+    penalized for the failure; new repair rules are not. A fix that
+    skipped penalizing entirely would pass S4-10 but fail here.
+    """
+    ralph = RALPHLoop(str(tmp_path))
+    ralph.input_type = "pdf"
+    existing = [
+        {"id": "R001", "confidence": 0.9, "support": 5},
+        {"id": "R002", "confidence": 0.8, "support": 3},
+    ]
+    failure_info = {"missing_fields": ["Vendor_Name"], "error": "incomplete"}
+    result = ralph.phase5_reflect(failure_info, existing_rules=existing)
+
+    by_id = {r["id"]: r for r in result}
+    # Existing rules penalized: 0.9 → 0.85, 0.8 → 0.75.
+    assert by_id["R001"]["confidence"] == 0.85
+    assert by_id["R002"]["confidence"] == 0.75
+    # New repair rule created at 0.6, unpenalized.
+    new_ids = [rid for rid in by_id if rid not in {"R001", "R002"}]
+    assert len(new_ids) == 1
+    assert by_id[new_ids[0]]["confidence"] == 0.6
