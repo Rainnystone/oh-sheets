@@ -76,6 +76,18 @@ class ReferenceBank:
         with open(self.anchors_file, 'r', encoding='utf-8') as f:
             return json.load(f)
 
+    def query_anchors(self, field: str | None = None):
+        """Slice 2: query the anchor store.
+
+        - field=None → return all anchors (the full dict).
+        - field given → return that field's anchor (a dict). Returns None
+          if the field has no anchor.
+        """
+        anchors = self.load_anchors()
+        if field is None:
+            return anchors
+        return anchors.get(field)
+
     def save_rules(self, rules: list):
         with open(self.rules_file, 'w', encoding='utf-8') as f:
             for rule in rules:
@@ -93,32 +105,110 @@ class ReferenceBank:
         input_signature=None,
         top_k: int = 10,
     ) -> list:
-        """Slice 1: filter rules by input_type + trigger.
+        """Filter rules by input_type + trigger, then expand 1 hop via the
+        knowledge graph (slice 2).
 
-        Reserved parameters (input_signature) and behaviors (KG expansion,
-        signature preference, lazy decay) land in slices 2-4.
+        Reserved parameters (input_signature) and behaviors (signature
+        preference, lazy decay) land in slices 3-4.
         """
         rules = self.load_rules()
-        matched = [
+        direct = [
             r for r in rules
             if r.get("when", {}).get("trigger", "field_extraction") == trigger
             and r.get("when", {}).get("input_type", "auto") in (input_type, "auto")
             and r.get("confidence", 0.0) >= 0.3
         ]
-        # Dedupe by rule ID — keep highest-confidence copy.
-        # Sort first so the first occurrence of each ID is the one we keep.
-        matched.sort(key=lambda r: r.get("confidence", 0.0), reverse=True)
-        seen_ids = set()
-        deduped = []
-        for r in matched:
+        direct_ids = {r.get("id") for r in direct}
+        # Slice 2: expand via KG. _expand_via_kg returns neighbor rules
+        # (not in direct_ids) tagged with _source="via_kg".
+        via_kg = self._expand_via_kg(direct_ids)
+
+        # Combine direct + via_kg. Sort by confidence desc.
+        combined = direct + via_kg
+        combined.sort(key=lambda r: r.get("confidence", 0.0), reverse=True)
+
+        # Dedupe by rule ID. If a rule is both direct and via_kg, direct
+        # wins — keep _source="direct". Sort already puts the direct copy
+        # first only if its confidence is >= the via_kg copy's, which isn't
+        # guaranteed, so track seen IDs and prefer direct on collision.
+        seen: dict[str, dict] = {}
+        for r in combined:
             rid = r.get("id")
-            if rid in seen_ids:
-                continue
-            seen_ids.add(rid)
-            deduped.append(r)
-        # Tag each returned rule with in-memory provenance. _source is NOT
-        # persisted — it lives only on the returned copies.
-        return [{**r, "_source": "direct"} for r in deduped[:top_k]]
+            if rid not in seen:
+                seen[rid] = r
+            else:
+                # Collision: prefer direct over via_kg
+                if r.get("_source") == "direct" and seen[rid].get("_source") != "direct":
+                    seen[rid] = r
+        deduped = list(seen.values())
+
+        # Tag any untagged (direct) rules with _source="direct". via_kg
+        # rules already carry _source from _expand_via_kg.
+        result = []
+        for r in deduped[:top_k]:
+            if "_source" not in r:
+                result.append({**r, "_source": "direct"})
+            else:
+                result.append(r)
+        return result
+
+    def _expand_via_kg(self, direct_rule_ids: set) -> list:
+        """Slice 2: find 1-hop neighbor rules via the knowledge graph.
+
+        Edge semantics:
+        - uses_anchor: symmetric among rules. If R001 and R002 both use
+          anchor A1, each is a neighbor of the other.
+        - often_follows: directional. Edge {from: R001, to: R002} means
+          R002 is a neighbor of R001 (not the reverse).
+
+        Only 1 hop — no transitive expansion. Neighbor rules already in
+        direct_rule_ids are excluded (they'll be tagged "direct" upstream).
+        Returns neighbor rule dicts with _source="via_kg" set (in-memory).
+        """
+        graph = self.load_knowledge_graph()
+        edges = graph.get("edges", [])
+
+        # Build anchor → rules map for uses_anchor symmetry, and collect
+        # directional often_follows neighbors.
+        anchor_to_rules: dict[str, set[str]] = {}
+        often_follows_neighbors: dict[str, set[str]] = {}
+        for e in edges:
+            rel = e.get("relation")
+            src = e.get("from")
+            dst = e.get("to")
+            if rel == "uses_anchor":
+                # src is a rule, dst is an anchor
+                anchor_to_rules.setdefault(dst, set()).add(src)
+            elif rel == "often_follows":
+                # directional: src → dst (both rules)
+                often_follows_neighbors.setdefault(src, set()).add(dst)
+
+        # Collect neighbor rule IDs reachable in 1 hop from direct rules.
+        neighbor_ids: set[str] = set()
+        for rid in direct_rule_ids:
+            # uses_anchor: find anchors used by rid, then other rules
+            # using the same anchor.
+            for anchor, rule_set in anchor_to_rules.items():
+                if rid in rule_set:
+                    neighbor_ids.update(rule_set - {rid})
+            # often_follows: directional neighbors
+            neighbor_ids.update(often_follows_neighbors.get(rid, set()))
+
+        # Exclude rules already in the direct set.
+        neighbor_ids -= direct_rule_ids
+        if not neighbor_ids:
+            return []
+
+        # Load neighbor rule dicts, apply quality filter (consistency with
+        # direct path), tag with _source="via_kg".
+        all_rules = self.load_rules()
+        neighbors = [
+            {**r, "_source": "via_kg"}
+            for r in all_rules
+            if r.get("id") in neighbor_ids
+            and r.get("confidence", 0.0) >= 0.3
+        ]
+        return neighbors
         
     def save_success_patterns(self, patterns: list):
         with open(self.patterns_file, 'w', encoding='utf-8') as f:

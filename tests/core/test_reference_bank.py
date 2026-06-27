@@ -100,6 +100,154 @@ def test_retrieve_rules_tags_source_direct(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# query_anchors (slice 2)
+# ---------------------------------------------------------------------------
+
+def test_query_anchors_by_field(tmp_path):
+    """query_anchors("vendor_name") returns the anchor for that field."""
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    anchors = {
+        "vendor_name": {"type": "text_match", "role": "label", "pattern": "Vendor"},
+        "amount": {"type": "spatial", "role": "value_matcher"},
+    }
+    bank.save_anchors(anchors)
+    result = bank.query_anchors("vendor_name")
+    assert result["type"] == "text_match"
+    assert result["role"] == "label"
+
+
+def test_query_anchors_all(tmp_path):
+    """query_anchors(None) returns the full anchor dict."""
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    anchors = {
+        "vendor_name": {"type": "text_match", "role": "label", "pattern": "Vendor"},
+        "amount": {"type": "spatial", "role": "value_matcher"},
+    }
+    bank.save_anchors(anchors)
+    result = bank.query_anchors()
+    assert result == anchors
+    # Missing field returns None
+    assert bank.query_anchors("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# retrieve_rules KG expansion (slice 2)
+# ---------------------------------------------------------------------------
+
+def _edge(src, dst, relation, weight=1.0):
+    return {"from": src, "to": dst, "relation": relation, "weight": weight}
+
+
+def test_retrieve_rules_expands_via_uses_anchor(tmp_path):
+    """retrieve_rules expands 1 hop via uses_anchor edges (symmetric).
+
+    Given R001 (pdf) uses anchor A1, and R002 (excel — wouldn't match the
+    pdf filter directly) also uses A1, retrieving pdf inputs that match
+    R001 also returns R002 with _source="via_kg".
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        _rule("R001", input_type="pdf", confidence=0.9),    # direct match
+        _rule("R002", input_type="excel", confidence=0.7),  # only via KG
+        _rule("R003", input_type="pdf", confidence=0.5),    # direct, no shared anchor
+    ])
+    # R001 and R002 both use anchor A1; R003 uses A2 (no other rule)
+    bank.save_knowledge_graph({"schema_version": "1.0", "edges": [
+        _edge("R001", "A1", "uses_anchor"),
+        _edge("R002", "A1", "uses_anchor"),
+        _edge("R003", "A2", "uses_anchor"),
+    ]})
+    result = bank.retrieve_rules("pdf")
+    sources = {r["id"]: r["_source"] for r in result}
+    # R001 and R003 matched the filter directly
+    assert sources["R001"] == "direct"
+    assert sources["R003"] == "direct"
+    # R002 (excel) reached the result via KG expansion through shared A1
+    assert sources["R002"] == "via_kg"
+
+
+def test_retrieve_rules_expands_via_often_follows(tmp_path):
+    """retrieve_rules expands via often_follows edges (directional).
+
+    Edge {from: R001, to: R002, relation: often_follows} means: when R001
+    is in the direct set, R002 is a neighbor. The reverse is NOT true —
+    if R002 is direct, R001 is NOT expanded.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        _rule("R001", input_type="pdf", confidence=0.9),     # direct match
+        _rule("R002", input_type="excel", confidence=0.7),   # neighbor via often_follows
+        _rule("R003", input_type="excel", confidence=0.6),   # NOT a neighbor (reverse direction)
+    ])
+    # R001 →often_follows→ R002 (directional). R003 →often_follows→ R001
+    # means R001 is a neighbor of R003, NOT the reverse.
+    bank.save_knowledge_graph({"schema_version": "1.0", "edges": [
+        _edge("R001", "R002", "often_follows"),
+        _edge("R003", "R001", "often_follows"),
+    ]})
+    result = bank.retrieve_rules("pdf")
+    sources = {r["id"]: r["_source"] for r in result}
+    # R002 expanded via R001→R002 edge (directional, correct direction)
+    assert sources["R002"] == "via_kg"
+    # R003 is NOT expanded — R003→R001 edge points the wrong way
+    assert "R003" not in sources
+
+
+def test_retrieve_rules_direct_wins_over_via_kg(tmp_path):
+    """A rule that is BOTH direct (matches filter) AND a KG neighbor is
+    returned once with _source="direct" — never "via_kg", never twice.
+
+    R001 and R002 both match the pdf filter directly AND share anchor A1.
+    Without dedupe-prefer-direct, R002 might appear as via_kg (because
+    _expand_via_kg would otherwise include it). The implementation
+    excludes direct IDs from via_kg, AND dedupe prefers direct on
+    collision — both paths are covered by this test.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        _rule("R001", input_type="pdf", confidence=0.9),
+        _rule("R002", input_type="pdf", confidence=0.7),
+    ])
+    bank.save_knowledge_graph({"schema_version": "1.0", "edges": [
+        _edge("R001", "A1", "uses_anchor"),
+        _edge("R002", "A1", "uses_anchor"),
+    ]})
+    result = bank.retrieve_rules("pdf")
+    ids = [r["id"] for r in result]
+    # R002 appears exactly once
+    assert ids.count("R002") == 1
+    # And its source is direct (matched the filter), not via_kg
+    r002 = next(r for r in result if r["id"] == "R002")
+    assert r002["_source"] == "direct"
+
+
+def test_retrieve_rules_kg_1_hop_only(tmp_path):
+    """KG expansion is 1 hop only — no transitive closure.
+
+    Chain: R001 →often_follows→ R002 →often_follows→ R003.
+    Matching R001 (direct) returns R002 (1-hop neighbor) but NOT R003
+    (2-hop neighbor). All non-direct rules use input_type="excel" so
+    they cannot match the pdf filter directly — they only enter the
+    result set via KG.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        _rule("R001", input_type="pdf", confidence=0.9),    # direct
+        _rule("R002", input_type="excel", confidence=0.7),  # 1-hop
+        _rule("R003", input_type="excel", confidence=0.6),  # 2-hop — must NOT appear
+    ])
+    bank.save_knowledge_graph({"schema_version": "1.0", "edges": [
+        _edge("R001", "R002", "often_follows"),
+        _edge("R002", "R003", "often_follows"),
+    ]})
+    result = bank.retrieve_rules("pdf")
+    ids = {r["id"] for r in result}
+    assert "R001" in ids           # direct
+    assert "R002" in ids           # 1-hop neighbor
+    assert "R003" not in ids       # 2-hop — would require transitive expansion
+
+
+# ---------------------------------------------------------------------------
 # add_rule (slice 1)
 # ---------------------------------------------------------------------------
 
