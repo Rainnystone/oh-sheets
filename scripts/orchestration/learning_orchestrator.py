@@ -14,10 +14,9 @@ import json
 import sys
 import os
 from pathlib import Path
-from datetime import datetime
 
 from scripts.core.reference_bank import ReferenceBank
-from scripts.core.rule_evolution import update_rule_confidence
+from scripts.core.rule_evolution import Outcome
 from scripts.core.signature_matcher import calculate_signature
 from scripts.core.input_type import determine_input_type as _determine_input_type
 
@@ -267,14 +266,10 @@ class RALPHLoop:
             accuracy=1.0,
         )
 
-        # Update rule confidence
-        rules = self.bank.load_rules()
-        updated_rules = []
-        for r in rules:
-            ur = update_rule_confidence(r, 1.0)
-            if ur is not None:
-                updated_rules.append(ur)
-        self.bank.save_rules(updated_rules)
+        # Slice 4: single outcome writer. apply_outcome(SUCCESS) rewards
+        # all rules (+0.02 confidence, +1 support) and persists. Replaces
+        # the inline confidence-update loop.
+        self.bank.apply_outcome(Outcome.SUCCESS)
 
         return {"status": "committed", "signature": input_sig}
 
@@ -290,45 +285,36 @@ class RALPHLoop:
         failure penalty. A rule just invented to repair a missing field
         hasn't been tested yet, so penalizing it would snuff it out
         before it ever got a fair trial.
+
+        The penalty runs via the Bank's single outcome writer
+        (apply_outcome). New rules are created AFTER the penalty sweep,
+        so they're not on disk when it runs and are spared.
         """
         if hasattr(self, '_analyze_failure'):
-            new_rules = self._analyze_failure(failure_info, existing_rules)
-        else:
-            # Default: create rules for missing fields. Use bank.add_rule()
-            # for unique IDs (max+1, not len+1) and real input_type tagging.
-            new_rules = list(existing_rules)
-            # Reserve existing rule IDs so add_rule won't reuse them. In
-            # production existing_rules == bank.load_rules() (already on
-            # disk, so add_rule sees them), but phase5_reflect must also
-            # work when called directly with rules not yet on disk —
-            # otherwise a new rule collides with an existing ID, inherits
-            # its "existing" status, and gets wrongly penalized.
-            for r in existing_rules:
-                rid = r.get("id")
-                if rid:
-                    self.bank._pending_rule_ids.add(rid)
-            for field in failure_info.get("missing_fields", []):
-                new_rules.append(self.bank.add_rule(
-                    input_type=self.input_type,
-                    trigger="field_extraction",
-                    field=field,
-                    action="retry_extract",
-                    confidence=0.6,
-                ))
+            return self._analyze_failure(failure_info, existing_rules)
 
-        # Penalize existing rules only (failure signal). New rules created
-        # above keep their creation confidence — they haven't been tested.
-        existing_ids = {r.get("id") for r in existing_rules}
-        updated_rules = []
-        for r in new_rules:
-            if r.get("id") in existing_ids:
-                ur = update_rule_confidence(r, 0.2)  # Low outcome = confidence decrease
-                if ur is not None:
-                    updated_rules.append(ur)
-            else:
-                updated_rules.append(r)
+        # Penalize existing rules via the Bank's single outcome writer.
+        # apply_outcome reads from disk, so ensure existing rules are
+        # persisted first — in production they're already on disk
+        # (existing_rules == bank.load_rules()), but phase5_reflect must
+        # also work for direct callers passing rules not yet saved.
+        # Saving first also lets add_rule see the existing IDs and avoid
+        # collisions (no need to manually reserve pending IDs).
+        self.bank.save_rules(existing_rules)
+        self.bank.apply_outcome(Outcome.FAILURE)
 
-        return updated_rules
+        # New repair rules keep creation confidence (0.6) — created
+        # after the penalty sweep, so they're not on disk when it runs.
+        new_rules = []
+        for field in failure_info.get("missing_fields", []):
+            new_rules.append(self.bank.add_rule(
+                input_type=self.input_type,
+                trigger="field_extraction",
+                field=field,
+                action="retry_extract",
+                confidence=0.6,
+            ))
+        return self.bank.load_rules() + new_rules
 
 
 def run_learning(args):
