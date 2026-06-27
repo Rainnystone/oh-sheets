@@ -384,3 +384,32 @@ def test_record_success_pattern_populates_full_schema(tmp_path):
     assert p["pattern_id"].startswith("P")
     # created_at is an ISO timestamp (parseable).
     datetime.fromisoformat(p["created_at"])
+
+
+def test_record_success_pattern_generates_sequential_ids(tmp_path):
+    """pattern_id is max(existing)+1, not len(existing)+1.
+
+    Same convention as add_rule's R00x IDs. Two successive calls produce
+    P001 then P002; if a P005 already exists on disk, the next is P006
+    (not P002).
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.record_success_pattern(
+        input_signature="s1", input_type="pdf", extracted={"a": "1"},
+        rules_used=[], anchors_matched=[],
+    )
+    bank.record_success_pattern(
+        input_signature="s2", input_type="pdf", extracted={"b": "2"},
+        rules_used=[], anchors_matched=[],
+    )
+    ids = [p["pattern_id"] for p in bank.load_success_patterns()]
+    assert ids == ["P001", "P002"]
+
+    # Pre-existing P005 on disk → next is P006 (max+1, not len+1=3).
+    bank2 = ReferenceBank(str(tmp_path / "bank2"))
+    bank2.save_success_patterns([{"pattern_id": "P005", "accuracy": 1.0}])
+    bank2.record_success_pattern(
+        input_signature="s3", input_type="pdf", extracted={"c": "3"},
+        rules_used=[], anchors_matched=[],
+    )
+    assert bank2.load_success_patterns()[-1]["pattern_id"] == "P006"
