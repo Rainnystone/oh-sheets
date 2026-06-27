@@ -120,6 +120,14 @@ pip install docling pdf2image pandas openpyxl Pillow google-genai
 - 保护公式单元格不被提取数据覆盖
 - 利用公式依赖关系进行验证
 
+### 架构说明 (v2.1)
+
+经过一系列深度化重构，参考库 (Reference Bank) 现已成为**深度模块**——一个极小的接口（`retrieve_rules`、`load_anchors`、`record_success_pattern`、`apply_outcome`）背后承载着庞大的实现，独占所有持久化、知识图谱扩展、签名优先级与规则生命周期。其它任何模块都不直接读写它的文件。
+
+执行编排器 (execution orchestrator) 已从一个约 175 行的“上帝函数”分解为一条由具名、单一职责步骤组成的短流水线（`_load_inputs` → `_retrieve_context` → `_try_extraction_with_degradation` → `_validate` → `_detect_formula_conflicts` → `_write_output` → `_record_outcome`），每一步都可独立单元测试。`sys.exit` 被限制在 `__main__` 块内；库函数改为抛出异常或返回值。
+
+领域术语表见 [CONTEXT.md](CONTEXT.md)，架构决策见 [docs/adr/](docs/adr/)。
+
 ## 📁 目录结构
 
 ```
@@ -127,13 +135,15 @@ oh-sheets!/
 ├── SKILL.md                          # AI 智能体技能定义
 ├── README.md                         # 英文文档
 ├── README_zh.md                      # 中文文档
+├── CONTEXT.md                        # 领域术语表（统一语言）
 │
 ├── scripts/
 │   ├── core/                         # 核心模块
-│   │   ├── reference_bank.py         # Reference Bank 增删改查
+│   │   ├── reference_bank.py         # Reference Bank：单一持久化所有者（深度模块）
 │   │   ├── rule_evolution.py         # 规则置信度更新与衰减
 │   │   ├── prompt_builder.py         # LLM prompt 构建
-│   │   └── signature_matcher.py      # MD5 签名与模式匹配
+│   │   ├── signature_matcher.py      # MD5 签名与模式匹配
+│   │   └── input_type.py             # 纯函数：扩展名 → input_type 标签
 │   │
 │   ├── extraction/                   # 提取模块
 │   │   ├── llm_extractor.py          # LLM 提取（google-genai）
@@ -147,7 +157,7 @@ oh-sheets!/
 │   │   └── local_few_shot_memory.py  # Few-shot 示例存储
 │   │
 │   ├── orchestration/                # 编排层
-│   │   ├── execution_orchestrator.py # 主提取流程
+│   │   ├── execution_orchestrator.py # 主提取流程（已分解为流水线）
 │   │   └── learning_orchestrator.py  # RALPH Loop 实现
 │   │
 │   └── utils/                        # 工具函数
@@ -155,21 +165,21 @@ oh-sheets!/
 │       └── env_check.py
 │
 ├── references/
-│   ├── prompt_templates.md           # Prompt 模板
-│   └── config_schema.md              # 配置 schema
+│   └── prompt_templates.md           # Prompt 模板
 │
 ├── docs/
+│   ├── adr/                          # 架构决策记录 (ADR)
+│   ├── issues/                       # 切片规格（按候选方案的路线图）
+│   ├── prd/                          # 产品需求与路线图
 │   └── superpowers/specs/            # 设计规范
 │
-├── tests/                            # 测试套件（镜像 scripts/）
-│   ├── core/
-│   ├── extraction/
-│   ├── io/
-│   ├── memory/
-│   ├── orchestration/
-│   └── utils/
-│
-└── examples/                         # 示例模板
+└── tests/                            # 测试套件（镜像 scripts/）
+    ├── core/
+    ├── extraction/
+    ├── io/
+    ├── memory/
+    ├── orchestration/
+    └── utils/
 ```
 
 ### 模板目录结构

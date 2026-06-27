@@ -120,6 +120,14 @@ The system automatically:
 - Protects formula cells from being overwritten during extraction
 - Uses formula dependencies for validation
 
+### Architecture Notes (v2.1)
+
+After a series of deepening refactors, the Reference Bank is now a **deep module** — a small interface (`retrieve_rules`, `load_anchors`, `record_success_pattern`, `apply_outcome`) fronting a large implementation that owns all persistence, knowledge-graph expansion, signature preference, and rule lifecycle. Nothing else reads or writes its files.
+
+The execution orchestrator has been decomposed from a single ~175-line god function into a short pipeline of named, single-responsibility steps (`_load_inputs` → `_retrieve_context` → `_try_extraction_with_degradation` → `_validate` → `_detect_formula_conflicts` → `_write_output` → `_record_outcome`), each independently unit-testable. `sys.exit` is confined to `__main__` blocks; library functions raise or return values instead.
+
+See [CONTEXT.md](CONTEXT.md) for the domain glossary and [docs/adr/](docs/adr/) for architecture decisions.
+
 ## 📁 Directory Structure
 
 ```
@@ -127,13 +135,15 @@ oh-sheets!/
 ├── SKILL.md                          # Skill definition for AI agents
 ├── README.md                         # English documentation
 ├── README_zh.md                      # Chinese documentation
+├── CONTEXT.md                        # Domain glossary (ubiquitous language)
 │
 ├── scripts/
 │   ├── core/                         # Core modules
-│   │   ├── reference_bank.py         # Reference Bank CRUD operations
+│   │   ├── reference_bank.py         # Reference Bank: single persistence owner (deep module)
 │   │   ├── rule_evolution.py         # Rule confidence update & decay
 │   │   ├── prompt_builder.py         # LLM prompt construction
-│   │   └── signature_matcher.py      # MD5 signature & pattern matching
+│   │   ├── signature_matcher.py      # MD5 signature & pattern matching
+│   │   └── input_type.py             # Pure ext → input_type tag mapper
 │   │
 │   ├── extraction/                   # Extraction modules
 │   │   ├── llm_extractor.py          # LLM extraction (google-genai)
@@ -147,7 +157,7 @@ oh-sheets!/
 │   │   └── local_few_shot_memory.py  # Few-shot example storage
 │   │
 │   ├── orchestration/                # Orchestration layer
-│   │   ├── execution_orchestrator.py # Main extraction flow
+│   │   ├── execution_orchestrator.py # Main extraction flow (decomposed pipeline)
 │   │   └── learning_orchestrator.py  # RALPH Loop implementation
 │   │
 │   └── utils/                        # Utilities
@@ -155,21 +165,21 @@ oh-sheets!/
 │       └── env_check.py
 │
 ├── references/
-│   ├── prompt_templates.md           # Prompt templates
-│   └── config_schema.md              # Configuration schema
+│   └── prompt_templates.md           # Prompt templates
 │
 ├── docs/
+│   ├── adr/                          # Architecture Decision Records
+│   ├── issues/                       # Slice specs (per-candidate roadmap)
+│   ├── prd/                          # Product requirements & roadmaps
 │   └── superpowers/specs/            # Design specifications
 │
-├── tests/                            # Test suite (mirrors scripts/)
-│   ├── core/
-│   ├── extraction/
-│   ├── io/
-│   ├── memory/
-│   ├── orchestration/
-│   └── utils/
-│
-└── examples/                         # Example templates
+└── tests/                            # Test suite (mirrors scripts/)
+    ├── core/
+    ├── extraction/
+    ├── io/
+    ├── memory/
+    ├── orchestration/
+    └── utils/
 ```
 
 ### Template Directory Structure
