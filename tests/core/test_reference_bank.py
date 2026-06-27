@@ -623,3 +623,22 @@ def test_decay_inactive_rules_prunes_stale(tmp_path):
     assert rules["R001"]["confidence"] < 0.8   # actually decayed
     # R002: recent, no decay
     assert rules["R002"]["confidence"] == 0.9
+
+
+def test_decay_inactive_rules_archives_below_threshold(tmp_path):
+    """If decay drops a rule below 0.3, it's archived (removed), not
+    just left lingering. A rule at 0.31 unused 100 days decays to
+    ~0.15 and is gone.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    old_last_used = (datetime.now() - timedelta(days=100)).isoformat()
+    bank.save_rules([
+        {"id": "R001", "confidence": 0.31, "last_used": old_last_used},  # decays < 0.3
+        {"id": "R002", "confidence": 0.9, "last_used": old_last_used},   # decays but survives
+    ])
+    archived = bank.decay_inactive_rules()
+    rules = bank.load_rules()
+    ids = [r["id"] for r in rules]
+    assert "R001" not in ids        # archived
+    assert "R002" in ids            # survived
+    assert archived == 1
