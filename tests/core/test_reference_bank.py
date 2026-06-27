@@ -689,3 +689,37 @@ def test_retrieve_rules_updates_last_used(tmp_path):
     on_disk = bank.load_rules()
     retrieved_last_used = datetime.fromisoformat(on_disk[0]["last_used"])
     assert before <= retrieved_last_used <= after
+
+
+def test_retrieve_rules_does_not_persist_source(tmp_path):
+    """_source is in-memory provenance only — it must NEVER be written
+    to rules.jsonl, even though slice 4 makes retrieve_rules rewrite
+    the file twice (decay, then last_used freshening).
+
+    Regression guard: exercise all three sources (direct, via_kg,
+    via_signature) in one retrieval so the rewrite path is stressed,
+    then reload from disk and assert no rule carries _source. A leaked
+    _source would corrupt the rule schema and confuse later retrievals.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        _rule("R001", input_type="pdf", confidence=0.9),    # direct + via_signature
+        _rule("R002", input_type="excel", confidence=0.7),  # via_kg (shared anchor)
+    ])
+    bank.save_knowledge_graph({"schema_version": "1.0", "edges": [
+        _edge("R001", "A1", "uses_anchor"),
+        _edge("R002", "A1", "uses_anchor"),
+    ]})
+    bank.save_success_patterns([
+        {"pattern_id": "P001", "input_signature": "S1",
+         "input_type": "pdf", "accuracy": 1.0, "rules_used": ["R001"]},
+    ])
+    result = bank.retrieve_rules("pdf", input_signature="S1")
+    # Result carries _source tags (provenance is useful in-memory).
+    sources = {r["id"]: r.get("_source") for r in result}
+    assert sources["R001"] == "via_signature"
+    assert sources["R002"] == "via_kg"
+    # On disk: no rule carries _source.
+    on_disk = bank.load_rules()
+    for r in on_disk:
+        assert "_source" not in r
