@@ -602,3 +602,69 @@ def test_retrieve_context_no_mismatch_when_no_patterns_stored():
     assert ctx.signature_mismatch is False
     assert ctx.matched == []
     assert ctx.input_type == "md"
+
+
+def test_detect_formula_conflicts_removes_field_mapping_to_formula_cell(tmp_path):
+    """A schema field whose target cell holds a formula is reported as a
+    conflict and dropped from the extracted data so the formula cell is
+    never overwritten.
+
+    Slice 6c (god-function decomposition, candidate 02).
+    """
+    import openpyxl
+    from scripts.orchestration.execution_orchestrator import _detect_formula_conflicts
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["D5"] = "=SUM(D2:D4)"  # formula cell
+    wb.save(str(tmp_path / "template.xlsx"))
+
+    schema = {
+        "fields": {
+            "Field_A": {"cell": "B2", "type": "string"},   # plain cell
+            "Field_B": {"cell": "D5", "type": "number"},    # formula cell -> conflict
+        }
+    }
+    extracted = {"Field_A": "keep me", "Field_B": 100}
+
+    result_extracted, conflicts = _detect_formula_conflicts(schema, extracted, tmp_path)
+
+    assert conflicts == [{"field": "Field_B", "cell": "D5"}]
+    assert "Field_B" not in result_extracted
+    assert result_extracted["Field_A"] == "keep me"
+
+
+def test_detect_formula_conflicts_no_conflict_when_cell_is_plain(tmp_path):
+    """No conflict when schema fields map to plain (non-formula) cells."""
+    import openpyxl
+    from scripts.orchestration.execution_orchestrator import _detect_formula_conflicts
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["B2"] = ""
+    wb.save(str(tmp_path / "template.xlsx"))
+
+    schema = {"fields": {"Field_A": {"cell": "B2", "type": "string"}}}
+    extracted = {"Field_A": "value"}
+
+    result_extracted, conflicts = _detect_formula_conflicts(schema, extracted, tmp_path)
+
+    assert conflicts == []
+    assert result_extracted == {"Field_A": "value"}
+
+
+def test_detect_formula_conflicts_swallows_analysis_failure(tmp_path):
+    """If formula analysis fails (e.g. no template.xlsx present), the step
+    returns the extracted data untouched with no conflicts — it never
+    blocks the run. Mirrors the original `except Exception: pass` guard.
+    """
+    from scripts.orchestration.execution_orchestrator import _detect_formula_conflicts
+
+    schema = {"fields": {"Field_A": {"cell": "B2", "type": "string"}}}
+    extracted = {"Field_A": "value"}
+    # tmp_path has no template.xlsx -> analyze_workbook_formulas raises
+
+    result_extracted, conflicts = _detect_formula_conflicts(schema, extracted, tmp_path)
+
+    assert conflicts == []
+    assert result_extracted == {"Field_A": "value"}

@@ -96,6 +96,39 @@ def _retrieve_context(bank, content: str, input_path: str) -> "_RetrievalContext
         signature_mismatch=signature_mismatch,
     )
 
+
+def _detect_formula_conflicts(schema, extracted, template_dir):
+    """Detect schema fields that would overwrite template formula cells.
+
+    Single-responsibility step extracted from run_orchestrator (slice 6c,
+    candidate 02 — god-function decomposition). For each schema field
+    whose target cell holds a formula in the template AND is present in
+    the extracted data, record a conflict and drop the field so the
+    formula is preserved on write.
+
+    Returns (cleaned_extracted, conflicts). Does not mutate the input
+    extracted dict — returns a new dict with conflicting fields removed,
+    so callers and tests get a predictable value back. If formula
+    analysis itself fails (missing template, corrupt workbook), the step
+    is a no-op: it returns the extracted data untouched with no conflicts,
+    mirroring the original `except Exception: pass` guard.
+    """
+    conflicts = []
+    try:
+        template_formulas = analyze_workbook_formulas(str(template_dir / "template.xlsx"))
+        formula_cells = {f["cell"] for f in template_formulas}
+        for field_name, field_spec in schema.get("fields", {}).items():
+            if isinstance(field_spec, dict):
+                cell = field_spec.get("cell", "")
+                if cell in formula_cells and field_name in extracted:
+                    conflicts.append({"field": field_name, "cell": cell})
+    except Exception:
+        pass  # formula analysis failure is non-fatal
+    conflict_fields = {c["field"] for c in conflicts}
+    cleaned = {k: v for k, v in extracted.items() if k not in conflict_fields}
+    return cleaned, conflicts
+
+
 def _try_extraction_with_degradation(
     content: str,
     schema: dict,
@@ -218,25 +251,8 @@ def run_orchestrator(args):
             "error": "Extracted data missing required fields."
         })
 
-    # Formula conflict detection
-    formula_conflicts = []
-    try:
-        template_formulas = analyze_workbook_formulas(str(template_dir / "template.xlsx"))
-        formula_cells = {f["cell"] for f in template_formulas}
-
-        # Check if any schema field maps to a formula cell
-        for field_name, field_spec in schema.get("fields", {}).items():
-            if isinstance(field_spec, dict):
-                cell = field_spec.get("cell", "")
-                if cell in formula_cells and field_name in extracted:
-                    formula_conflicts.append({
-                        "field": field_name,
-                        "cell": cell
-                    })
-                    # Remove from extracted data to prevent overwriting formula
-                    del extracted[field_name]
-    except Exception:
-        pass  # If formula analysis fails, continue without conflict detection
+    # Formula conflict detection — drop fields that would overwrite formulas
+    extracted, formula_conflicts = _detect_formula_conflicts(schema, extracted, template_dir)
     
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as tmp:
         json.dump(extracted, tmp, ensure_ascii=False, indent=2)
