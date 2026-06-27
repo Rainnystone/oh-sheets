@@ -3,6 +3,7 @@ import re
 import json
 from datetime import datetime, timedelta
 from scripts.core.reference_bank import ReferenceBank
+from scripts.core.rule_evolution import Outcome
 
 
 # ---------------------------------------------------------------------------
@@ -518,3 +519,27 @@ def test_retrieve_rules_via_signature_overrides_via_kg(tmp_path):
     result_sig = bank.retrieve_rules("pdf", input_signature="S1")
     sources_sig = {r["id"]: r["_source"] for r in result_sig}
     assert sources_sig["R002"] == "via_signature"
+
+
+# ---------------------------------------------------------------------------
+# apply_outcome / decay_inactive_rules (slice 4)
+# ---------------------------------------------------------------------------
+
+def test_apply_outcome_success_rewards_all(tmp_path):
+    """apply_outcome(Outcome.SUCCESS) rewards every rule in the bank:
+    +0.02 confidence, +1 support. Replaces the three duplicated loops.
+
+    5-rule bank, all at confidence 0.80, support 3. After SUCCESS, all
+    five are at 0.82 with support 4.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    bank.save_rules([
+        {"id": f"R00{i}", "confidence": 0.80, "support": 3}
+        for i in range(1, 6)
+    ])
+    bank.apply_outcome(Outcome.SUCCESS)
+    rules = bank.load_rules()
+    assert len(rules) == 5
+    for r in rules:
+        assert r["confidence"] == 0.82
+        assert r["support"] == 4

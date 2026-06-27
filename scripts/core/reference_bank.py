@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 
 from scripts.core.signature_matcher import match_patterns
+from scripts.core.rule_evolution import Outcome, update_rule_confidence
 
 # Slice 3: _source precedence for retrieve_rules dedupe. Highest wins when
 # the same rule is reachable via multiple paths. A rule that historically
@@ -298,6 +299,27 @@ class ReferenceBank:
         patterns = self.load_success_patterns()
         patterns.append(pattern)
         self.save_success_patterns(patterns)
+
+    def apply_outcome(self, outcome: "Outcome") -> int:
+        """Slice 4: reward/penalize all rules per outcome.
+
+        Replaces the three duplicated confidence-update loops in
+        execution_orchestrator, learning_orchestrator.phase4_commit, and
+        learning_orchestrator.phase5_reflect. Archives rules that drop
+        below 0.3. Persists the updated rule set. Returns the count
+        archived.
+        """
+        rules = self.load_rules()
+        kept: list[dict] = []
+        archived_count = 0
+        for r in rules:
+            ur = update_rule_confidence(r, outcome.value)
+            if ur is None:
+                archived_count += 1
+            else:
+                kept.append(ur)
+        self.save_rules(kept)
+        return archived_count
         
     def save_knowledge_graph(self, graph: dict):
         with open(self.graph_file, 'w', encoding='utf-8') as f:
