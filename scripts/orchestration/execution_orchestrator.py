@@ -7,10 +7,12 @@ from pathlib import Path
 from scripts.core.reference_bank import ReferenceBank
 from scripts.core.prompt_builder import build_context_prompt
 from scripts.core.signature_matcher import match_patterns, calculate_signature
+from scripts.core.input_type import determine_input_type as _determine_input_type
 from scripts.extraction.formula_analyzer import extract_formulas_from_schema, analyze_workbook_formulas
 from scripts.extraction.llm_extractor import extract_data
 from scripts.io.excel_writer import write_excel
 from scripts.core.rule_evolution import update_rule_confidence
+
 
 def log_execution(memory_dir: Path, record: dict):
     os.makedirs(memory_dir, exist_ok=True)
@@ -103,8 +105,9 @@ def run_orchestrator(args):
         
     input_sig = calculate_signature(content)
     bank = ReferenceBank(str(template_dir / "reference_bank"))
-    
-    rules = bank.load_rules()
+
+    input_type = _determine_input_type(args.input)
+    rules = bank.retrieve_rules(input_type)
     anchors = bank.load_anchors()
     patterns = bank.load_success_patterns()
     formulas = extract_formulas_from_schema(schema)
@@ -224,12 +227,21 @@ def run_orchestrator(args):
         "output": str(args.output)
     })
 
-    updated_rules = []
-    for r in rules:
-        ur = update_rule_confidence(r, 1.0)
-        if ur is not None:
-            updated_rules.append(ur)
-    bank.save_rules(updated_rules)
+    # Reward retrieved rules with success outcome, then save the FULL bank.
+    # Don't overwrite with `updated_rules` (the retrieved subset) — that
+    # would delete every non-retrieved rule and persist the in-memory
+    # _source tag. Merge confidences into load_rules() before saving.
+    retrieved_ids = {r.get("id") for r in rules}
+    all_rules = bank.load_rules()
+    for r in all_rules:
+        if r.get("id") in retrieved_ids:
+            ur = update_rule_confidence(r, 1.0)
+            if ur is not None:
+                # Preserve non-confidence fields from the on-disk rule
+                # (don't leak _source into the persisted dict).
+                r["confidence"] = ur["confidence"]
+                r["support"] = ur.get("support", r.get("support", 0))
+    bank.save_rules(all_rules)
 
     patterns.append({
         "input_signature": input_sig,
