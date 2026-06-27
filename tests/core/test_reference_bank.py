@@ -642,3 +642,28 @@ def test_decay_inactive_rules_archives_below_threshold(tmp_path):
     assert "R001" not in ids        # archived
     assert "R002" in ids            # survived
     assert archived == 1
+
+
+# ---------------------------------------------------------------------------
+# retrieve_rules lazy decay + last_used + _source persistence (slice 4)
+# ---------------------------------------------------------------------------
+
+def test_retrieve_rules_triggers_lazy_decay(tmp_path):
+    """retrieve_rules() runs decay_inactive_rules() before retrieval —
+    stale rules are pruned on read, not on a separate cron.
+
+    A rule unused 60 days at confidence 0.8: after retrieve_rules("pdf"),
+    the on-disk rule's confidence should be decayed (0.8 * 0.99^30 ≈ 0.59),
+    not the original 0.8. Lazy decay at retrieval time means the bank
+    never serves a stale rule to the prompt.
+    """
+    bank = ReferenceBank(str(tmp_path / "bank"))
+    old_last_used = (datetime.now() - timedelta(days=60)).isoformat()
+    rule = _rule("R001", input_type="pdf", confidence=0.8)
+    rule["last_used"] = old_last_used
+    bank.save_rules([rule])
+    bank.retrieve_rules("pdf")
+    on_disk = bank.load_rules()
+    expected = round(0.8 * (0.99 ** 30), 4)
+    assert on_disk[0]["confidence"] == expected
+    assert on_disk[0]["confidence"] < 0.8

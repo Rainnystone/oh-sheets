@@ -126,8 +126,13 @@ class ReferenceBank:
         - via_signature: succeeded on a signature-matched input before
           (rules_used in a matched success pattern). Slice 3.
 
-        Reserved behaviors (lazy decay, last_used updates) land in slice 4.
+        Slice 4: runs decay_inactive_rules() first so stale rules are
+        pruned before reaching the prompt.
         """
+        # Slice 4: lazy decay. Prune stale rules on read so the bank
+        # never serves a decayed-confidence rule to the prompt. This is
+        # the only place decay runs — no separate cron/tick.
+        self.decay_inactive_rules()
         rules = self.load_rules()
         direct = [
             r for r in rules
